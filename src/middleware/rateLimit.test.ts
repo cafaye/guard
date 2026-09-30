@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
-import { rateLimit } from "./rateLimit";
+import { rateLimit, RATE_LIMIT_HEADERS } from "./rateLimit";
 import { memoryRateLimitStore, type RateLimitStore } from "./rateLimitStore";
 import { GCRA_LUA, redisRateLimitStore, type RedisCommands } from "./rateLimitRedis";
 import type { AuthEnv, Principal } from "./jwt";
@@ -203,6 +203,26 @@ function digestOf(identity: string): string {
 }
 
 describe("RateLimit-* headers", () => {
+  test("the announced family is exactly RATE_LIMIT_HEADERS, and nothing else", async () => {
+    // The list is exported so a consumer that has to *name* these headers — the
+    // OpenAPI document does, for the `429` — reads one list rather than copying
+    // eight spellings into a YAML file. That only holds while this test says the
+    // two agree, so a header added to `announce` without being added here fails
+    // rather than shipping undocumented.
+    const res = await app({ limit: 3 }).request("/");
+
+    // The set, not a count: a rename, a swap and an addition are all caught, and
+    // an addition is the direction that would reach a client undocumented.
+    // `RateLimit` carries no dash and the bare name is a field of the draft, so
+    // the filter is a prefix rather than a `RateLimit-` prefix.
+    const announced = [...res.headers.keys()]
+      .filter((name) => /^(x-)?ratelimit/i.test(name))
+      .map((name) => name.toLowerCase())
+      .sort();
+
+    expect(announced).toEqual(RATE_LIMIT_HEADERS.map((name) => name.toLowerCase()).sort());
+  });
+
   test("RFC 9651-era fields: RateLimit-Policy and RateLimit, as structured fields", async () => {
     const a = app({ limit: 3, windowMs: 30_000 });
     const res = await a.request("/");

@@ -172,6 +172,32 @@ function bucket(policy: string, identity: string): string {
 }
 
 /**
+ * Every field `announce` sets, by name.
+ *
+ * Exported rather than kept private because something outside this file has to
+ * name them all and must not spell them from memory: `openapi/v1.yaml` puts each
+ * one on the `429`, and a rate-limit header family the document and the
+ * middleware name differently is a client reading `RateLimit-Remaining` from a
+ * header nobody documented. `rateLimit.test.ts` asserts this list and what
+ * `announce` actually sets are the same set, so adding a field to one without
+ * the other is a failing test rather than a silent divergence.
+ *
+ * `Retry-After` is deliberately not here. It is not part of the allowance — it
+ * is an instruction, set only on a refusal, and RFC 9110 defines it rather than
+ * the draft these come from.
+ */
+export const RATE_LIMIT_HEADERS = [
+  "RateLimit-Policy",
+  "RateLimit",
+  "RateLimit-Limit",
+  "RateLimit-Remaining",
+  "RateLimit-Reset",
+  "X-RateLimit-Limit",
+  "X-RateLimit-Remaining",
+  "X-RateLimit-Reset",
+] as const;
+
+/**
  * The headers, on every answered request.
  *
  * Two shapes, because clients in the field read two shapes and a gateway that
@@ -223,6 +249,11 @@ function announce(
   c.header("X-RateLimit-Limit", String(policy.limit));
   c.header("X-RateLimit-Remaining", String(verdict.remaining));
   c.header("X-RateLimit-Reset", String(verdict.resetAt));
+
+  // These eight literals and `RATE_LIMIT_HEADERS` are the same set, and
+  // `rateLimit.test.ts` is what keeps them so: a field added here and not there
+  // ships undocumented, and one removed here and not there makes the document
+  // promise a header this process stopped sending.
 }
 
 /**

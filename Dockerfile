@@ -32,6 +32,11 @@ COPY src ./src
 # test/ holds the JWKS test double the suite serves. The runtime stage below
 # does not copy it, so test-only code can never reach a running gateway.
 COPY test ./test
+# openapi/ holds the HTTP contract, and `test/openapiDocument.test.ts` reads it
+# and holds it to the router. Without this line the tripwire would not run in the
+# image that ships — the suite would be green having checked the document in no
+# tree at all, which is the exact shape of a check that verifies nothing.
+COPY openapi ./openapi
 RUN bun test
 
 # -------------------------------------------------------- deps (production)
