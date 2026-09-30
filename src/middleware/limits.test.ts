@@ -79,7 +79,7 @@ describe("resolveLimit — one assertion per shipped entry", () => {
 
   test("anything unrecognised falls back to the default", () => {
     expect(resolveLimit(table, "/").policy).toBe(DEFAULT_LIMIT_TABLE.default.policy);
-    expect(resolveLimit(table, "/v2/anything")).policy).toBe(DEFAULT_LIMIT_TABLE.default.policy);
+    expect(resolveLimit(table, "/v2/anything").policy).toBe(DEFAULT_LIMIT_TABLE.default.policy);
   });
 });
 

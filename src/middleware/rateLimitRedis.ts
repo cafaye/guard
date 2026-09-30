@@ -76,14 +76,17 @@ return {1, next, next - interval - window, math.max(0, limit - used)}
 export type RedisRateLimitStoreOptions = {
   commands: RedisCommands;
   /**
-   * Key namespace, so two guards (or two environments) sharing one Redis do not
-   * read each other's buckets. Constrained to the base64url alphabet because it
-   * ends up in a Redis key.
+   * Sub-namespace, so two guards (or two environments) sharing one Redis do not
+   * read each other's buckets. It is *added to* guard's own namespace rather
+   * than replacing it: a key outside `guard:rl` is a key nobody can find again
+   * with `KEYS`, and a bucket namespace an operator can typo away is a bucket
+   * namespace that silently stops limiting. Constrained to the base64url
+   * alphabet because it ends up in a Redis key.
    */
   prefix?: string;
 };
 
-const DEFAULT_PREFIX = "guard:rl";
+const NAMESPACE = "guard:rl";
 
 export type RedisRateLimitStore = RateLimitStore & {
   /** The Redis key a bucket lives in. v0 introspection, off the trait. */
@@ -99,7 +102,7 @@ export type RedisRateLimitStore = RateLimitStore & {
  */
 export function redisRateLimitStore(options: RedisRateLimitStoreOptions): RedisRateLimitStore {
   const { commands } = options;
-  const prefix = parsePrefix(options.prefix ?? DEFAULT_PREFIX);
+  const prefix = options.prefix === undefined ? NAMESPACE : `${NAMESPACE}:${parsePrefix(options.prefix)}`;
 
   const keyFor = (bucket: string): string => `${prefix}:${assertBucket(bucket)}`;
 
@@ -163,7 +166,6 @@ function parsePrefix(value: string): string {
   }
   return value;
 }
-
 // ---------------------------------------------------------------- transport
 
 const encoder = new TextEncoder();
@@ -275,7 +277,7 @@ const DEFAULT_TIMEOUT_MS = 2_000;
  * The socket itself is the one part of this backend the suite does not execute.
  * TODO(guard-06) as at the top of the file.
  */
-export function connectRedis(options: RedisConnectionOptions): RedisCommands & { close(): void } {
+export async function connectRedis(options: RedisConnectionOptions): Promise<RedisCommands & { close(): void }> {
   const target = parseRedisUrl(options.url);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   assertPositiveInteger(timeoutMs, "timeoutMs");
@@ -284,7 +286,7 @@ export function connectRedis(options: RedisConnectionOptions): RedisCommands & {
   const pending: RespValue[] = [];
   /** Callers waiting for a reply, oldest first. */
   const waiting: Array<(value: RespValue) => void> = [];
-  let buffered = new Uint8Array(0);
+  let buffered: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   let broken: Error | null = null;
 
   const fail = (error: Error): void => {
@@ -312,7 +314,10 @@ export function connectRedis(options: RedisConnectionOptions): RedisCommands & {
     }
   };
 
-  const socket = Bun.connect({
+  // `await` because Bun's own types declare this as a promise, and a socket is
+  // not a thenable, so awaiting a value that arrived synchronously costs one
+  // microtask and is correct under either shape.
+  const socket = await Bun.connect({
     hostname: target.hostname,
     port: target.port,
     ...(target.tls ? { tls: {} } : {}),

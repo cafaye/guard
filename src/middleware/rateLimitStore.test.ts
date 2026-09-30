@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { memoryRateLimitStore, type Verdict } from "./rateLimitStore";
+import { memoryRateLimitStore, type RateLimitStore, type Verdict } from "./rateLimitStore";
 
 const WINDOW_MS = 60_000;
 
@@ -77,16 +77,20 @@ describe("the sliding window boundary — the fixed-window 2x burst", () => {
     expect(after).toEqual([false, false, false, false, false]);
   });
 
-  test("one request just past the edge is admitted, because one unit expired", async () => {
+  test("one interval past the edge one request is admitted, because one unit expired", async () => {
     const store = memoryRateLimitStore();
     const EDGE = 1_020_000;
+    const interval = WINDOW_MS / 5;
 
     for (let i = 0; i < 5; i++) await hit(store, "k", 5, EDGE - 1);
 
-    // Exactly one interval of debt has been repaid by now, so exactly one more
-    // request fits. The other four must wait for their own.
-    expect((await hit(store, "k", 5, EDGE)).allowed).toBe(true);
-    expect((await hit(store, "k", 5, EDGE)).allowed).toBe(false);
+    // One interval — not one millisecond, which repays nothing — later, the
+    // first of those five has aged out, so exactly one more request fits. The
+    // other four must wait for their own.
+    const after = EDGE - 1 + interval;
+
+    expect((await hit(store, "k", 5, after)).allowed).toBe(true);
+    expect((await hit(store, "k", 5, after)).allowed).toBe(false);
   });
 
   test("capacity is repaid smoothly rather than in one lump at the boundary", async () => {
@@ -111,9 +115,13 @@ describe("the sliding window boundary — the fixed-window 2x burst", () => {
     for (let i = 0; i < 5; i++) await hit(store, "k", 5, 0);
     expect((await hit(store, "k", 5, 0)).allowed).toBe(false);
 
-    // One full window of silence repays everything.
-    expect((await hit(store, "k", 5, WINDOW_MS)).allowed).toBe(true);
-    expect((await hit(store, "k", 5, WINDOW_MS)).remaining).toBe(4);
+    // One full window of silence repays everything — which is one request, not
+    // two. The allowance is a bucket, and a refused request did not put anything
+    // in it, so a refilled bucket is a full one.
+    const refilled = await hit(store, "k", 5, WINDOW_MS);
+
+    expect(refilled.allowed).toBe(true);
+    expect(refilled.remaining).toBe(4);
   });
 });
 
@@ -258,7 +266,7 @@ describe("bounded memory", () => {
 
 describe("a store outage", () => {
   test("a store that throws is reported as unavailable, not as a refusal", async () => {
-    const broken = {
+    const broken: RateLimitStore = {
       hit: () => Promise.reject(new Error("redis: connection refused")),
     };
 

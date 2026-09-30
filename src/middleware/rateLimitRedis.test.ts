@@ -10,6 +10,7 @@ import {
 const WINDOW_MS = 60_000;
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 /**
  * A stand-in for Redis that runs the GCRA script's own algorithm.
@@ -37,11 +38,6 @@ function fakeRedis(): RedisCommands & { calls: Array<{ key: string; args: string
 
       const key = keysIn[0] ?? "";
       calls.push({ key, args });
-
-      const [limitText, windowText, nowText] = args;
-      const limit = Number(limitText);
-      const windowMs = Number(windowText);
-      const now = Number(nowText);
 
       // --- GCRA_LUA, line for line -----------------------------------------
       // local tat = tonumber(redis.call('GET', KEYS[1]) or '0')
@@ -125,8 +121,11 @@ describe("redisRateLimitStore", () => {
     expect(GCRA_LUA).toContain("redis.call('SET', KEYS[1]");
     expect(GCRA_LUA).toContain("'PX'");
     // It must expire its own key, or a Redis deployment accumulates a bucket
-    // for every client that has ever connected.
-    expect(GCRA_LUA.split("\n").filter((line) => line.trim() === "end").length).toBe(1);
+    // for every client that has ever connected. And one branch, because one
+    // branch is the whole claim: a script with a second `if` is a script whose
+    // decision is harder to read off than its answer.
+    const lines = GCRA_LUA.split("\n").map((line) => line.trim()).filter(Boolean);
+    expect(lines.filter((line) => line.startsWith("if "))).toHaveLength(1);
   });
 
   test("a reply that is not the shape the script promises is refused, not guessed at", async () => {
@@ -144,7 +143,7 @@ describe("redisRateLimitStore", () => {
 
 describe("RESP encoding", () => {
   test("writes a command as an array of bulk strings", () => {
-    const written = encoder.decode(encodeCommand(["GET", "guard:rl:k"]));
+    const written = decoder.decode(encodeCommand(["GET", "guard:rl:k"]));
 
     expect(written).toBe("*2\r\n$3\r\nGET\r\n$10\r\nguard:rl:k\r\n");
   });
@@ -154,7 +153,7 @@ describe("RESP encoding", () => {
     // would read the tail as the next bulk header.
     const written = encodeCommand(["SET", "k", "é"]);
 
-    expect(encoder.decode(written)).toBe("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$2\r\né\r\n");
+    expect(decoder.decode(written)).toBe("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$2\r\né\r\n");
   });
 
   test("refuses an empty command, which RESP cannot express", () => {
@@ -163,7 +162,9 @@ describe("RESP encoding", () => {
 });
 
 describe("RESP reply parsing", () => {
-  const parse = (text: string) => parseReply(encoder.encode(text));
+  // `parseReply` reports how many bytes it used, because the socket reader has to
+  // resume after them; a test that only wants the value says so here.
+  const parse = (text: string) => parseReply(encoder.encode(text)).value;
 
   test("reads an integer reply", () => {
     expect(parse(":42\r\n")).toEqual(42);
