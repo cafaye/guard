@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createApp, runtimeOptions, type ProbeStatus } from "./index";
+import { createApiKeyAuth, memoryApiKeyStore } from "./middleware/apiKey";
+import { DEFAULT_LIMIT_TABLE } from "./middleware/limits";
 import { signToken, startJwksServer, testKey, type JwksServer, type TestKey } from "../test/jwksServer";
 import { strictTable } from "../test/limitTable";
 
@@ -111,6 +113,9 @@ describe("app surface", () => {
 
 const CLIENT_ID = "guard-test";
 
+/** The account the minted token below acts on, shared with the API-key cases. */
+const ACCOUNT = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+
 let identity: JwksServer;
 let key: TestKey;
 
@@ -190,7 +195,7 @@ describe("GET /v1/me", () => {
     expect((await app.request("/readyz")).status).toBe(200);
   });
 
-  test("traffic is rate limited, and so is a rejected token", async () => {
+  test("traffic is rate limited, and so is the request after it", async () => {
     const app = createApp({
       jwt: { issuer: identity.issuer, audience: CLIENT_ID },
       rateLimit: { limits: strictTable(1) },
@@ -201,6 +206,62 @@ describe("GET /v1/me", () => {
     const res = await app.request("/v1/me", bearer(await token()));
 
     expect(res.status).toBe(429);
+  });
+
+  test("a token that does not verify 401s and never becomes a rate-limit key", async () => {
+    // The requirement, and the reason the limiter is mounted after the auth gate:
+    // a credential guard could not verify has no account, so there is nothing to
+    // count it against. Keying on an unverified claim would be a limiter any
+    // caller can reset by sending a different one.
+    const app = createApp({
+      jwt: { issuer: identity.issuer, audience: CLIENT_ID },
+      rateLimit: { limits: strictTable(1) },
+    });
+
+    const refused = [
+      "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.", // alg: none
+      "not-a-token",
+      "",
+    ];
+    for (const value of refused) {
+      const res = await app.request("/v1/me", bearer(value));
+
+      expect(res.status).toBe(401);
+      expect(res.headers.get("ratelimit-limit")).toBeNull();
+    }
+
+    // An expired token, which is a well-formed token that is simply too old.
+    const expired = await signToken(key, {
+      iss: identity.issuer,
+      aud: CLIENT_ID,
+      sub: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+      iat: Math.floor(Date.now() / 1000) - 600,
+      exp: Math.floor(Date.now() / 1000) - 300,
+    });
+    expect((await app.request("/v1/me", bearer(expired))).status).toBe(401);
+
+    // The good token still has its whole allowance: nothing above was counted
+    // against the account it claims.
+    expect((await app.request("/v1/me", bearer(await token()))).status).toBe(200);
+  });
+
+  test("the bucket is the account, so two accounts never share an allowance", async () => {
+    const app = createApp({
+      jwt: { issuer: identity.issuer, audience: CLIENT_ID },
+      rateLimit: { limits: strictTable(1) },
+    });
+    const other = async () =>
+      signToken(key, {
+        iss: identity.issuer,
+        aud: CLIENT_ID,
+        sub: "9c1f0d2a-1111-4222-8333-444455556666",
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 60,
+      });
+
+    expect((await app.request("/v1/me", bearer(await token()))).status).toBe(200);
+    expect((await app.request("/v1/me", bearer(await other()))).status).toBe(200);
+    expect((await app.request("/v1/me", bearer(await token()))).status).toBe(429);
   });
 
   test("an app with no identity configured serves no /v1 surface at all", async () => {
@@ -297,5 +358,192 @@ describe("runtimeOptions: the BFF identity URL", () => {
 
     expect(options.probes?.identity).toBeDefined();
     expect(options.bff?.identityUrl).toBe("http://identity:8080");
+  });
+});
+
+describe("runtimeOptions: the rate limiter", () => {
+  test("the shipped table is the one the app enforces", () => {
+    const limits = runtimeOptions({}).rateLimit?.limits;
+
+    expect(limits?.default).toEqual(DEFAULT_LIMIT_TABLE.default);
+    expect(limits?.routes?.["/auth/login"]).toEqual(DEFAULT_LIMIT_TABLE.routes?.["/auth/login"]);
+  });
+
+  test("RATE_LIMIT_REQUESTS overrides the general allowance only", () => {
+    const limits = runtimeOptions({ RATE_LIMIT_REQUESTS: "42" }).rateLimit?.limits;
+
+    expect(limits?.default.limit).toBe(42);
+    // The auth-adjacent entries are not configuration in v0: a table that is
+    // half environment and half code is a table where lowering `default` is
+    // mistaken for having lowered the login limit too.
+    expect(limits?.routes?.["/auth/login"]?.limit).toBe(DEFAULT_LIMIT_TABLE.routes?.["/auth/login"]?.limit);
+  });
+
+  test("an empty variable leaves the shipped allowance alone", () => {
+    expect(runtimeOptions({ RATE_LIMIT_REQUESTS: "  " }).rateLimit?.limits?.default.limit).toBe(
+      DEFAULT_LIMIT_TABLE.default.limit,
+    );
+  });
+
+  test("a limit of zero is a startup error, not unlimited", () => {
+    for (const value of ["0", "-1", "1.5", "soon"]) {
+      expect(() => runtimeOptions({ RATE_LIMIT_REQUESTS: value })).toThrow(RangeError);
+    }
+  });
+
+  test("TRUSTED_PROXIES is how much of X-Forwarded-For is believed, and zero is the default", () => {
+    expect(runtimeOptions({}).rateLimit?.trustedProxies).toBe(0);
+    expect(runtimeOptions({ TRUSTED_PROXIES: "2" }).rateLimit?.trustedProxies).toBe(2);
+    expect(() => runtimeOptions({ TRUSTED_PROXIES: "-1" })).toThrow(RangeError);
+  });
+
+  test("no REDIS_URL means the in-memory store, which is the single-instance answer", () => {
+    const options = runtimeOptions({});
+
+    expect(options.rateLimit?.store).toBeUndefined();
+    expect(Object.keys(options.probes ?? {})).not.toContain("redis");
+  });
+
+  test("REDIS_URL selects the Redis store and registers it as a readiness dependency", () => {
+    const options = runtimeOptions({ REDIS_URL: "redis://redis:6379" });
+
+    expect(options.rateLimit?.store).toBeDefined();
+    expect(Object.keys(options.probes ?? {})).toContain("redis");
+  });
+
+  test("building the app with a REDIS_URL opens no socket", () => {
+    // The connection is lazy, which is what keeps this test off the network and
+    // keeps a Redis outage from being a refusal to boot. The URL is still parsed
+    // eagerly, so a typo is still a startup error.
+    expect(() => createApp(runtimeOptions({ REDIS_URL: "redis://127.0.0.1:6379" }))).not.toThrow();
+    expect(() => createApp(runtimeOptions({ REDIS_URL: "redis//redis" }))).toThrow(RangeError);
+    expect(() => createApp(runtimeOptions({ REDIS_URL: "http://redis:6379" }))).toThrow(RangeError);
+  });
+});
+
+describe("the shipped per-route table, through the app", () => {
+  // `rateLimit: {}` and nothing else: the shipped table, the in-memory store, no
+  // trusted proxies, and a real clock. This is what a deployment that accepted
+  // the defaults is running.
+  const shipped = () => createApp({ jwt: { issuer: identity.issuer, audience: CLIENT_ID }, rateLimit: {} });
+
+  test("the auth surface is named as its own policy and the API surface as another", async () => {
+    const app = shipped();
+
+    const me = await app.request("/v1/me", bearer(await token()));
+    const login = await app.request("/auth/login", { method: "POST" });
+
+    expect(me.headers.get("RateLimit-Policy")).toBe(
+      `"${DEFAULT_LIMIT_TABLE.routes?.["/v1/"]?.policy}";q=${DEFAULT_LIMIT_TABLE.routes?.["/v1/"]?.limit};w=60`,
+    );
+    expect(login.headers.get("RateLimit-Policy")).toBe(
+      `"${DEFAULT_LIMIT_TABLE.routes?.["/auth/login"]?.policy}";q=${DEFAULT_LIMIT_TABLE.routes?.["/auth/login"]?.limit};w=60`,
+    );
+  });
+
+  test("a login attempt is throttled by the login policy, not the API one", async () => {
+    const limit = DEFAULT_LIMIT_TABLE.routes?.["/auth/login"]?.limit ?? 0;
+    const app = shipped();
+    const attempt = () =>
+      app.request("/auth/login", { method: "POST", headers: { origin: "https://console.cafaye.com" } });
+
+    const statuses: number[] = [];
+    for (let i = 0; i < limit + 1; i++) statuses.push((await attempt()).status);
+
+    // The first `limit` are answered by whatever is behind the route — 404 here,
+    // because no browser surface is configured — and the one after them is a 429
+    // on the login policy alone. Had /auth/login drawn on the general API
+    // allowance, ten attempts would not have been enough to be refused.
+    expect(statuses.slice(0, limit).every((status) => status !== 429)).toBe(true);
+    expect(statuses[limit]).toBe(429);
+  });
+
+  test("the API allowance is untouched by an exhausted login allowance", async () => {
+    const app = shipped();
+    const attempt = () =>
+      app.request("/auth/login", { method: "POST", headers: { origin: "https://console.cafaye.com" } });
+
+    for (let i = 0; i <= DEFAULT_LIMIT_TABLE.routes?.["/auth/login"]?.limit!; i++) await attempt();
+
+    expect((await attempt()).status).toBe(429);
+    // Different policy, different bucket: the general API allowance is a
+    // different 600 and has not been touched.
+    expect((await app.request("/v1/me", bearer(await token()))).status).toBe(200);
+  });
+});
+
+describe("API keys through the app", () => {
+  test("a key authenticates, and is limited under its account rather than its secret", async () => {
+    const keys = memoryApiKeyStore();
+    const app = createApp({
+      jwt: { issuer: identity.issuer, audience: CLIENT_ID },
+      rateLimit: { limits: strictTable(1) },
+      apiKeys: { keys },
+    });
+    const auth = createApiKeyAuth({ keys });
+
+    const first = await auth.issue({ accountId: "acc-1", scopes: [] });
+    const second = await auth.issue({ accountId: "acc-2", scopes: [] });
+    const asKey = (secret: string) => app.request("/v1/me", { headers: { authorization: `ApiKey ${secret}` } });
+
+    expect((await asKey(first.key)).status).toBe(200);
+    // A different account, so a different bucket: two keys do not share one
+    // allowance, which is the whole point of keying on the account.
+    expect((await asKey(second.key)).status).toBe(200);
+    expect((await asKey(first.key)).status).toBe(429);
+  });
+
+  test("a revoked key is 401 on the next request, and the secret never comes back", async () => {
+    const keys = memoryApiKeyStore();
+    const app = createApp({ jwt: { issuer: identity.issuer, audience: CLIENT_ID }, apiKeys: { keys } });
+    const auth = createApiKeyAuth({ keys });
+    const issued = await auth.issue({ accountId: "acc-1", scopes: [] });
+    const asKey = () => app.request("/v1/me", { headers: { authorization: `ApiKey ${issued.key}` } });
+
+    expect((await asKey()).status).toBe(200);
+
+    await keys.revoke(issued.id);
+
+    const refused = await asKey();
+    const body = await refused.text();
+
+    expect(refused.status).toBe(401);
+    expect(body).not.toContain(issued.key);
+    expect(body).not.toContain(issued.key.slice(12));
+    // What is kept is the hash, and the list is how an operator sees it.
+    const [listed] = await keys.list("acc-1");
+    expect(listed?.prefix).toBe(issued.prefix);
+    expect(listed?.revokedAt).toBeGreaterThan(0);
+  });
+
+  test("a key and a token for the same account share one allowance", async () => {
+    const keys = memoryApiKeyStore();
+    const app = createApp({
+      jwt: { issuer: identity.issuer, audience: CLIENT_ID },
+      rateLimit: { limits: strictTable(1) },
+      apiKeys: { keys },
+    });
+    const auth = createApiKeyAuth({ keys });
+    const issued = await auth.issue({ accountId: ACCOUNT, scopes: [] });
+
+    expect((await app.request("/v1/me", bearer(await token()))).status).toBe(200);
+    const byKey = await app.request("/v1/me", { headers: { authorization: `ApiKey ${issued.key}` } });
+
+    // Same account, one bucket: holding a second credential must not be a way to
+    // double one's rate.
+    expect(byKey.status).toBe(429);
+  });
+
+  test("an app with no key store refuses a key rather than ignoring it", async () => {
+    const app = createApp({ jwt: { issuer: identity.issuer, audience: CLIENT_ID } });
+    const auth = createApiKeyAuth({ keys: memoryApiKeyStore() });
+    const issued = await auth.issue({ accountId: ACCOUNT, scopes: [] });
+
+    // No gate mounted, so the key is not a credential and the request is
+    // anonymous: the token gate answers 401 rather than the key gate answering
+    // 200 for a key guard has never heard of.
+    const res = await app.request("/v1/me", { headers: { authorization: `ApiKey ${issued.key}` } });
+
+    expect(res.status).toBe(401);
   });
 });

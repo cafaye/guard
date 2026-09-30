@@ -45,6 +45,17 @@ export type RateLimitOptions = {
    * per-route table cannot be resolved once at construction.
    */
   policy: (c: Context) => string;
+  /**
+   * The numbers a policy name stands for, when a route carries its own.
+   *
+   * `limit` and `windowMs` above are the allowance for a policy this table does
+   * not name, which is the common case: one gateway, one allowance. When a
+   * deployment ships a per-route table, this is how the stricter entries get
+   * their own numbers instead of inheriting the default's — the policy name is
+   * the key, and a name the table does not carry falls back rather than failing,
+   * so a typo in a table costs the default allowance and nothing else.
+   */
+  resolve?: (policy: string) => { limit: number; windowMs: number } | null;
   /** Clock, injected so a test can cross a window boundary without sleeping. */
   now?: () => number;
   /** Paths that are never throttled. See `index.ts` for the probe endpoints. */
@@ -60,7 +71,7 @@ export type RateLimitOptions = {
  * in `rateLimit.test.ts` exists to hold in place.
  */
 export function rateLimit(options: RateLimitOptions): MiddlewareHandler<AuthEnv> {
-  const { store, policy, now = Date.now, exempt = () => false } = options;
+  const { store, policy, now = Date.now, exempt = () => false, resolve } = options;
   const trustedProxies = options.trustedProxies ?? 0;
   const limits = new Map<string, { limit: number; windowMs: number; policy: string }>();
 
@@ -70,19 +81,32 @@ export function rateLimit(options: RateLimitOptions): MiddlewareHandler<AuthEnv>
   assertPositiveInteger(options.windowMs, "windowMs");
   assertNonNegativeInteger(trustedProxies, "trustedProxies");
 
-  const { limit, windowMs } = options;
-
   // The policy name is validated per distinct name rather than once, because a
   // policy is read per request and only the names a request actually asks for can
   // be checked. It is validated, not escaped: a name that cannot be serialised
   // into a structured field is a configuration mistake to surface, and the one
   // way it could be *not* surfaced is a header carrying a second field item that
   // a client reads as a second policy.
+  //
+  // The numbers come from the table when it has an entry for the name, and from
+  // the constructor otherwise — so one gateway with one allowance needs no table
+  // at all, and a gateway with a per-route table gets each entry's own numbers
+  // rather than the default's on every route.
   const allow = (name: string): { limit: number; windowMs: number; policy: string } => {
     const known = limits.get(name);
     if (known) return known;
 
-    const checked = { limit, windowMs, policy: assertStructuredKey(name, "policy") };
+    const entry = resolve?.(name);
+    if (entry) {
+      assertPositiveInteger(entry.limit, `policy ${name}: limit`);
+      assertPositiveInteger(entry.windowMs, `policy ${name}: windowMs`);
+    }
+
+    const checked = {
+      limit: entry?.limit ?? options.limit,
+      windowMs: entry?.windowMs ?? options.windowMs,
+      policy: assertStructuredKey(name, "policy"),
+    };
     limits.set(name, checked);
 
     return checked;

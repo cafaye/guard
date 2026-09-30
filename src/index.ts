@@ -188,6 +188,16 @@ function buildLimiter(config: AppOptions["rateLimit"]) {
   if (!config) return null;
 
   const table = limitTable(config.limits ?? DEFAULT_LIMIT_TABLE);
+  // Policy name -> that policy's own numbers, with `default` first so a route
+  // entry that reuses the default policy name inherits its own entry. This is
+  // the map that makes a per-route table's *numbers* per-route; without it every
+  // route would be enforced with the default's limit and only the header would
+  // differ, which is a limit table that looks configured and is not.
+  const byPolicy = new Map<string, { limit: number; windowMs: number }>();
+  for (const entry of [table.default, ...Object.values(table.routes ?? {})]) {
+    byPolicy.set(entry.policy, { limit: entry.limit, windowMs: entry.windowMs });
+  }
+
   const options: RateLimitOptions = {
     limit: table.default.limit,
     windowMs: table.default.windowMs,
@@ -196,6 +206,7 @@ function buildLimiter(config: AppOptions["rateLimit"]) {
     now: config.now ?? Date.now,
     exempt: (path) => PROBE_PATHS.has(path),
     policy: (c) => policyOf(c, table),
+    resolve: (name) => byPolicy.get(name) ?? null,
   };
 
   return rateLimit(options);

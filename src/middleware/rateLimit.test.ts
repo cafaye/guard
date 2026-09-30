@@ -436,6 +436,63 @@ describe("per-route limits", () => {
     expect(login.headers.get("RateLimit-Policy")).toContain("q=2");
     expect(me.headers.get("RateLimit-Policy")).toContain("q=5");
   });
+
+  test("one table, one store, and each policy enforced with its OWN numbers", async () => {
+    // The bug this pins: a limiter that names the policy per request but
+    // enforces one number on every route advertises a limit table and does not
+    // have one. `routed()` above hides it by building a limiter per request;
+    // here there is one limiter and the numbers come from `resolve`.
+    const store = memoryRateLimitStore();
+    const table = new Map([
+      ["guard-auth-login", { limit: 2, windowMs: WINDOW_MS }],
+      ["guard-api", { limit: 5, windowMs: WINDOW_MS }],
+    ]);
+    const a = new Hono<AuthEnv>();
+    a.use(
+      "*",
+      rateLimit({
+        limit: 100,
+        windowMs: WINDOW_MS,
+        store,
+        trustedProxies: 0,
+        now: () => 0,
+        policy: (c) => (new URL(c.req.url).pathname === "/auth/login" ? "guard-auth-login" : "guard-api"),
+        resolve: (name) => table.get(name) ?? null,
+      }),
+    );
+    a.post("/auth/login", (c) => c.json({ ok: true }));
+    a.get("/v1/me", (c) => c.json({ ok: true }));
+
+    // Two logins is the login allowance, and the third is refused.
+    expect((await a.request("/auth/login", { method: "POST" })).status).toBe(200);
+    expect((await a.request("/auth/login", { method: "POST" })).status).toBe(200);
+    expect((await a.request("/auth/login", { method: "POST" })).status).toBe(429);
+
+    // The API allowance is five, and none of it was spent by the logins.
+    for (let i = 0; i < 5; i++) expect((await a.request("/v1/me")).status).toBe(200);
+    expect((await a.request("/v1/me")).status).toBe(429);
+  });
+
+  test("a policy the table does not name falls back to the constructor's numbers", async () => {
+    const store = memoryRateLimitStore();
+    const a = new Hono<AuthEnv>();
+    a.use(
+      "*",
+      rateLimit({
+        limit: 1,
+        windowMs: WINDOW_MS,
+        store,
+        trustedProxies: 0,
+        now: () => 0,
+        policy: () => "unlisted",
+        resolve: () => null,
+      }),
+    );
+    a.get("/", (c) => c.json({ ok: true }));
+
+    expect((await a.request("/")).status).toBe(200);
+    expect((await a.request("/")).status).toBe(429);
+  });
 });
 
 describe("a store that is not there", () => {
