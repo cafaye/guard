@@ -23,15 +23,30 @@
 //
 // ## What it does not read, and who covers that
 //
-// `.dockerignore`. A named path that the ignore file excludes is a hard build
-// error, so a *file* cannot go missing quietly — but a `COPY src ./src` whose
-// contents are partly excluded copies the rest and stays green, which was
-// verified against buildkit rather than assumed. Modelling Docker's glob dialect
-// to catch that here would be a second implementation of a rule Docker already
-// has, and a permissive one would under-read silently. So it is not modelled:
-// the test suite emits the test files it actually discovered, and CI compares that
-// set against the repository's. The authoritative check is the built image, and
-// this reader is the fast one that runs before anyone builds anything.
+// `.dockerignore`. A named *file* the ignore file excludes is a hard build error
+// — buildkit computes a checksum against a path the context does not hold and
+// stops — so a file cannot go missing quietly. A *directory* can: `COPY src ./src`
+// with an excluded subdirectory copies everything else and stays green, and both
+// halves of that were verified against buildkit rather than assumed. Modelling
+// Docker's glob dialect to catch it here would be a second, permissive
+// implementation of a rule Docker already has, and a permissive one under-reads
+// silently — which is the failure this module exists to refuse.
+//
+// So it is not modelled here. The suite emits the test files it actually
+// discovered and the `image` CI job diffs that set against the repository's: the
+// built image is the authority on what a build put in it. This reader is the fast
+// half, and it runs before anyone builds anything.
+//
+// ## For kit, not just guard
+//
+// The reader is language-agnostic — it knows stages, `COPY` and `.`, and nothing
+// about Bun — so the same two files drop into any of kit's Dockerfile templates.
+// Two caveats a porter has to decide rather than inherit. The stage names differ
+// (`test` here; kit's templates have no test stage at all, which is the larger
+// version of this bug and is kit's to close), and a template that wants the check
+// to say anything has to stop copying the whole context in its runtime stage: all
+// seven currently end in `COPY . .`, which is the pattern this packet argues
+// against.
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
