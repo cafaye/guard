@@ -110,30 +110,52 @@ const TABLE: Row[] = [
     what: "capacity is repaid one interval at a time after the boundary",
     limit: 5,
     windowMs: WINDOW_MS,
-    // Debt after the five refused requests above runs to five intervals; each
-    // interval repays exactly one, so the allowance walks back rather than
-    // arriving in a lump.
-    at: [1_020_000, 1_032_000, 1_044_000, 1_056_000, 1_068_000, 1_080_000, 1_092_000, 1_104_000],
+    // The allowance is spent just before the edge, and then every instant on the
+    // interval grid is asked twice. Refused twice at the edge, then admitted
+    // once and refused once at every interval after it: capacity walks back a
+    // unit at a time instead of arriving in a lump, which is the whole
+    // difference between a sliding window and a fixed one.
+    at: [
+      1_019_999, 1_019_999, 1_019_999, 1_019_999, 1_019_999,
+      1_020_000, 1_020_000,
+      1_032_000, 1_032_000,
+      1_044_000, 1_044_000,
+      1_056_000, 1_056_000,
+      1_068_000, 1_068_000,
+      1_080_000, 1_080_000,
+    ],
     expected: [
-      [false, 0],
-      [true, 0],
-      [true, 0],
-      [true, 1],
-      [true, 2],
+      [true, 4],
       [true, 3],
-      [false, 0],
       [true, 2],
+      [true, 1],
+      [true, 0],
+      [false, 0],
+      [false, 0],
+      [true, 0],
+      [false, 0],
+      [true, 0],
+      [false, 0],
+      [true, 0],
+      [false, 0],
+      [true, 0],
+      [false, 0],
+      [true, 0],
+      [false, 0],
     ],
   },
   {
     what: "crossing the aligned-window edge buys no second allowance",
     limit: 2,
     windowMs: 10_000,
-    // 10_000 is where a wall-clock-aligned fixed window would have rolled.
+    // 10_000 is where a wall-clock-aligned fixed window would have rolled, so
+    // a fixed window admits all three. One millisecond later there is still a
+    // whole request left in the window, so the second answers "1 remaining",
+    // and the third has to wait.
     at: [9_999, 10_000, 10_001],
     expected: [
       [true, 1],
-      [true, 1],
+      [true, 0],
       [false, 0],
     ],
   },
@@ -156,14 +178,19 @@ const TABLE: Row[] = [
     limit: 4,
     windowMs: 10_000,
     at: [0, 2_500, 5_000, 7_500, 10_000, 12_500, 15_000],
+    // `remaining` is how much room is left to burst *now*, and a caller sending
+    // exactly one request per interval is always one interval in debt — so it
+    // holds a constant 3 rather than counting down to zero. A countdown here
+    // would be a fixed window's answer: it would promise a burst that the
+    // sliding window would then refuse.
     expected: [
       [true, 3],
-      [true, 2],
-      [true, 1],
-      [true, 0],
       [true, 3],
-      [true, 2],
-      [true, 1],
+      [true, 3],
+      [true, 3],
+      [true, 3],
+      [true, 3],
+      [true, 3],
     ],
   },
   {
