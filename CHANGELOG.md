@@ -8,6 +8,53 @@ dependency versions follow npm's own rules.
 
 ## [Unreleased]
 
+### Added
+
+- **`gate.yml` — the gate is now declared rather than discovered.** `bin/prime`
+  exists and CI runs it, so the gate was never *missing*; what was missing was
+  any statement of what it is worth. A developer here could run `bin/prime`,
+  see a green result, and learn nothing about whether the suite could detect
+  anything — replacing `bin/prime` with a script whose whole body is `exit 0`
+  would have left this repository green. The declaration states the command
+  (`bin/prime`), the entrypoint, two numeric floors, and five lines the gate's
+  own output must contain. Written against `cafaye/core`'s
+  `schemas/gate.schema.json` and checked by `harness/gate_check.py`, which now
+  reports **0 failures, 2 warnings** here — both the expected
+  `gate.requirement-unproven` for a bare command on PATH, which is the
+  tri-state working and never moves the exit code.
+  - **Two floors, not one, and the reason was measured.** `pass` is floored at
+    **423** against a measured 428 — the house margin muse and courier use, so
+    adding a test does not force a same-commit bump. `Ran … across N files` is
+    floored at **19** exactly, with no margin, because deleting
+    `test/noSkips.test.ts` took the suite from 428 to 423: the `pass` floor
+    stayed **green** through a deleted test file and only the file-count floor
+    caught it. The two are not redundant, which is not something a single floor
+    could have told us.
+  - **The declaration is red-proved four ways**, every one exiting 1: the
+    deleted test file (`gate.floor` on `files`); a deleted `typecheck` script
+    (`gate.proof-missing` on `typecheck`, and it was the *only* failure);
+    `bin/prime` replaced by `exit 0` (all five proofs red at once); and the
+    `pass` floor raised one above the measurement (`gate.floor` on `pass`).
+    No assertion was weakened, no sleep added, no retry count raised.
+  - **A silent typecheck skip is now a failure.** `bin/prime` probes for a
+    `typecheck` script and, finding none, prints a line to stderr and
+    continues to the suite — a green gate over a repository that had stopped
+    type-checking, with the only evidence on a stream a summary scrolls past.
+    The `typecheck` proof turns that into `gate.proof-missing`.
+
+### Known
+
+- **`mise run prime` does not resolve in this repository, and `gate.yml` does
+  not pretend otherwise.** `mise.toml` carries `[tools]` and `[env]` and no
+  `[tasks]` table, and `mise tasks` prints nothing. Six of the thirteen services
+  declare `gate.miseTask: prime`; guard's declaration names no task at all,
+  because naming a task this repository does not have is `gate.task-missing` —
+  a failure over a repository that is fine. `gate.command` names `bin/prime`,
+  which is what AGENTS.md already tells a developer to run and what the `prime`
+  CI job runs verbatim. Recorded rather than fixed: adding a `[tasks.prime]` is
+  a change to how the repository is driven, not a declaration of what it
+  already is.
+
 ### Fixed
 
 - **A burst of forged tokens naming an unknown `kid` bought one JWKS fetch each,

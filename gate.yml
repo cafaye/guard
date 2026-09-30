@@ -1,0 +1,322 @@
+# gate.yml — how guard is gated, declared rather than guessed.
+#
+# WHY THIS FILE EXISTS. The cafaye standard for declaring a gate lives in
+# `cafaye/core`: `schemas/gate.schema.json` is the format,
+# `harness/gate_check.py` is the checker, and `docs/gate.md` is the reasoning.
+# guard is adopting it, not inventing it. The short version: across fifteen
+# repositories "run the gate" had five different spellings, and every one of
+# them was found by a human getting it wrong. A gate that is discovered by
+# failure is a gate that was never declared.
+#
+# WHAT THE CHECKER PROVES ABOUT THIS FILE, AND WHAT IT DOES NOT. It proves the
+# command resolves, `bin/prime` exists and is executable, the CI workflow
+# really invokes it, and — the part that matters — that running the gate makes
+# every line in `proof` below appear, at or above the floor stated. It does NOT
+# prove the tests touched what they claim to, and it does NOT prove a
+# requirement is satisfied: a requirement is the operator's to satisfy, before
+# gating.
+#
+# MEASURED, NOT GUESSED. Every number and every pattern here came from running
+# this repository's gate on guard at 97d83e9, on a saturated 8-core host
+# (bun 1.3.12, mise 2026.8.4, macOS arm64):
+#
+#   * the developer-facing command is `bin/prime`, and it is ALSO the CI
+#     command — `.github/workflows/ci.yml`'s `prime` job runs `bin/prime`
+#     verbatim, with no CI-only variant. Verified, not assumed.
+#   * `bin/prime` prints, on a clean checkout:
+#         428 pass
+#          14 skip
+#          0 fail
+#         Ran 442 tests across 19 files. [9.70s]
+#   * the 14 skips are `src/middleware/rateLimitRedisLive.test.ts` and nothing
+#     else. Measured by running that file alone with no `GUARD_REDIS_URL`:
+#     `0 pass / 14 skip`, i.e. the whole file and nothing else.
+#   * with a real redis-server (throwaway, on 127.0.0.1:6399) the same command
+#     prints `442 pass / 0 skip`. So 442 is the total and 428 is what a run
+#     without Redis is entitled to claim. The floor below is set from the
+#     SMALLER of the two, because that is what the declared command prints.
+#   * a warm gate is ~36s wall clock including `bun install --frozen-lockfile`;
+#     the suite alone is ~8-10s.
+#
+# WHAT THE DEVELOPER'S COMMAND IS NOT, MEASURED. `mise run prime` does not
+# resolve in this repository. `mise.toml` carries `[tools]` and `[env]` and NO
+# `[tasks]` table, and `mise tasks` in a clean worktree prints nothing at all.
+# That is why `command` below names `bin/prime` and `miseTask` is absent
+# rather than set to `prime`: naming a task this repository does not have is
+# `gate.task-missing`, a FAILURE, and the honest declaration of a repository
+# with no task is no task. See REPORT-guard-09-gate.md — this is the one place
+# guard does not match the fleet's shape, and it is recorded rather than
+# papered over by inventing a task nobody runs.
+#
+# ------------------------------------------------------------------------------
+# RED-PROVED. A gate that has never been observed red is not a gate, so this
+# declaration was broken on purpose four times, `gate_check.py --prove` was run
+# after each, and every run exited 1. The breakages are named so the next reader
+# can repeat them, because a red proof nobody can reproduce is a claim. All four
+# were reverted; the tree is clean apart from this file.
+#
+#   1. `rm test/noSkips.test.ts`  ->  `gate.floor` on proof `files`:
+#      "reported 18 and the declaration's floor is 19". THE ONE THAT TAUGHT
+#      THIS FILE SOMETHING. That file holds 5 tests, so the run still printed
+#      `423 pass` — exactly equal to the `pass` floor below, and therefore NOT
+#      red. A deleted test file was caught by the `files` floor and by nothing
+#      else. That is the measured reason this declaration carries two numeric
+#      floors rather than one; see the `files` comment below.
+#   2. delete `scripts.typecheck` from package.json  ->  `gate.proof-missing`
+#      on proof `typecheck`, and it was the ONLY failure: the suite still ran
+#      and still printed 428 pass. `bin/prime` treats a missing typecheck script
+#      as a reason to print one line on stderr and carry on, so without that
+#      proof this breakage is a green gate. It is the strongest argument here.
+#   3. replace `bin/prime` with a script whose entire body is `exit 0`
+#      ->  `gate.proof-missing` on all five proofs at once. This is the case
+#      the format exists for: a command that exits zero without having run
+#      anything. It is red here, by five independent findings rather than by
+#      the exit code, so it cannot be talked green by editing one of them away.
+#   4. raise `proof[0].minimum` from 423 to 429  ->  `gate.floor` on proof
+#      `pass`: "reported 428 and the declaration's floor is 429". Proves the
+#      `pass` floor is live rather than a number nothing reads.
+#
+# Note what is NOT in that list: no breakage weakened an assertion, added a
+# sleep, or raised a retry count. Every one of the four is a deletion, a
+# substitution or a number, which is the only honest way to make a gate go red
+# without changing what the suite verifies.
+# ------------------------------------------------------------------------------
+version: 1
+name: guard
+
+gate:
+  # The command a person or a tool runs, as an argv and never a shell string, so
+  # the exit code is the gate's own. This fleet's one recorded false green was
+  # `… | tail -45; echo "PRIME EXIT=$?"` under zsh, where `$?` is tail's.
+  #
+  # `bin/prime` and not `mise run prime`, and that is a measured claim rather
+  # than a taste — see the header. It is also the honest dependency: this
+  # script's only hard requirement is `bun` on PATH (`require bun`, exiting 127
+  # with a sentence saying so), and it runs correctly under a bare PATH with
+  # mise absent. Declaring `mise run prime` would be declaring a command that
+  # cannot run here at all.
+  command: [bin/prime]
+  # `miseTask` is deliberately ABSENT. The format's own checker treats a
+  # repository that has a mise config but no `[tasks]` correctly: it reports
+  # nothing, because there is no task to disagree with. Adding
+  # `miseTask: prime` would be `gate.task-missing` and a red run over a
+  # repository that is fine. If guard ever grows `[tasks.prime]` in mise.toml,
+  # this line is the one to add, in the same commit — and `check_mise_task`
+  # will then hold the task's `run` string to `entrypoint` below.
+  #
+  # The file behind the command, and the file a developer is told to run in
+  # AGENTS.md's "Gates" section and in the repository's own header.
+  entrypoint: bin/prime
+  # Deliberately generous, and the reason is the same as every other adopter's.
+  # A warm gate measured ~36s; a cold checkout has to resolve and fetch `hono`
+  # and `jose` and `typescript` from npm before the suite starts, and this run
+  # was measured on a host with a load average above 100. A timeout tight
+  # enough to be a bug detector here is a timeout that fires on somebody's
+  # first clone and reports a red that is not the suite's answer. The suite's
+  # own budget is the thing to tune, not this.
+  timeoutSeconds: 900
+  proof:
+    # ---------------------------------------------------------------------
+    # The load-bearing one, and the only line that cannot appear unless the
+    # suite ran to the end and every assertion in it passed.
+    #
+    # `gate.proof-missing` is a FAILURE, so a gate that exits zero without
+    # emitting this is a red rather than a green. That is the defect the format
+    # exists to catch: a script whose last line became `exit 0` would satisfy
+    # the exit code and nothing else.
+    - id: pass
+      # Measured, not copied from core's 173 or courier's 530, and anchored at
+      # both ends on purpose. `bun test` prints exactly one line per count and
+      # exactly one line ends in ` pass`; `^\s*([0-9]+) pass$` with
+      # re.MULTILINE was checked against a real run's full output and matched
+      # exactly once, so `minimum` is read from the number and not from a
+      # substring of a longer line. `seen` is the LAST match, so a run that
+      # printed 428 and then something smaller is still caught.
+      match: '^\s*([0-9]+) pass$'
+      # 423, against a measured 428. The margin is deliberate and small, and
+      # it is the same margin muse and courier use (890 for 895, 530 for 535):
+      # a floor at exactly today's number is a floor that has to be raised by
+      # hand before a single test can be added, and a ratchet nobody can move
+      # is a ratchet that gets deleted. It is still a detector — a suite that
+      # quietly lost six tests is `gate.floor`, which is a failure.
+      #
+      # 428 is the number for a run with NO Redis, which is what `bin/prime`
+      # does: it never sets `GUARD_REDIS_URL`, so the live tier is always
+      # skipped here. A run WITH Redis prints 442 and clears this floor by 19.
+      # The floor is set from the smaller of the two on purpose — a
+      # declaration that only holds when an environment variable happens to be
+      # exported is a declaration that is red on a clean machine.
+      minimum: 423
+    # ---------------------------------------------------------------------
+    # The structural detector, and the one proof here that is immune to the
+    # environment-gated tier. `Ran N tests across M files` counts every
+    # REGISTERED test, so it reads 442 across 19 with Redis and 442 across 19
+    # without it. That invariance is the whole reason it is here.
+    - id: files
+      # The test count is non-capturing on purpose: `minimum` is read from the
+      # pattern's SINGLE capture group, so a second capturing group is
+      # `gate.proof-invalid`. The first draft of this file wrote
+      # `([0-9]+) tests across ([0-9]+) files` and the checker refused it with
+      # exactly that finding — the check working on the declaration that
+      # declares the checks.
+      match: '^Ran [0-9]+ tests across ([0-9]+) files\.'
+      # 19 exactly, and not a rounded number. There is no margin here and that
+      # is a DIFFERENT rule from the one on the floor above, for a measured
+      # reason: deleting `test/noSkips.test.ts` took the suite from 428 to 423
+      # — five tests — and 423 is exactly the `pass` floor, so that proof stayed
+      # GREEN through a deleted test file. Only this one caught it. A file count
+      # does not move when a test is added, so the margin that buys headroom on
+      # `pass` is pure loss here, and losing it is what let a five-test deletion
+      # through the other floor.
+      #
+      # It is the same set the `image` CI job diffs against `find`; this is the
+      # cheap half, running everywhere the gate runs, and the image job is the
+      # half that reads the built tree rather than the source.
+      minimum: 19
+    # ---------------------------------------------------------------------
+    # The step markers, and the reason there are three of them.
+    #
+    # `bin/prime` can exit 0 having done less than it appears to, and each of
+    # these is a way that happens. They are presence proofs with no `minimum`,
+    # so all they assert is that the banner was printed.
+    - id: install
+      # The banner, not the effect — `--frozen-lockfile` is in the string, and
+      # the string is the only thing a proof can read. A future edit that
+      # drops the flag still satisfies this line, which is why the repository
+      # also has a real check: `.github/workflows/ci.yml` runs
+      # `git diff --exit-code -- bun.lock` after the gate, and that step is
+      # what survives a dropped flag. This proof catches the cheaper failure,
+      # which is the install step not running at all.
+      match: '^== bun install --frozen-lockfile$'
+    - id: typecheck
+      # THE ONE THAT IS WORTH ITS PLACE. `bin/prime` probes for a `typecheck`
+      # script and, if it is absent, writes a line to stderr and CONTINUES to
+      # `bun test` — a green gate over a repository that stopped type-checking,
+      # with the only evidence on a stream that a summary tends to scroll past.
+      # Declaring the banner makes that a `gate.proof-missing`, which is a
+      # FAILURE. Deleting the `typecheck` script from package.json does not
+      # remove the banner from the script, so this catches the silent skip
+      # rather than the script that would have to change with it.
+      match: '^== bun run typecheck$'
+    - id: ok
+      # The gate reached its own last line. With `install` and `typecheck`
+      # above it, the three step markers bracket the run: two steps started,
+      # the gate finished. Cheap, and it is what distinguishes "the suite
+      # printed its summary" from "the gate completed".
+      match: '^== prime ok \(bun '
+    #
+    # NOT ASSERTED HERE, BECAUSE THE FORMAT CANNOT EXPRESS IT, and guard is the
+    # repository where that matters most. The suite legitimately skips 14 tests
+    # when `GUARD_REDIS_URL` is unset, so no floor on the skip line is
+    # honest — `minimum` is a LOWER bound, and the failure guard cares about is
+    # the skip count going UP (14 → 428, which is what deleting the tier's
+    # tests, or converting them to `test.skip`, would look like). A lower bound
+    # cannot catch an increase. So the skip count is stated here in prose and
+    # enforced in the three places that CAN see it, all pre-existing:
+    #   * `GUARD_REDIS_REQUIRED=true` turns "no Redis" from a skip into a
+    #     module-load throw, asserted by the tier itself;
+    #   * the `redis` CI job parses the summary and fails on `0 pass` or on any
+    #     skip, so the tier is forced there and nowhere else;
+    #   * `test/noSkips.test.ts` reads the suite's own source and fails on any
+    #     `skip` outside a one-entry allowlist.
+    # Those three protect the tier. The `pass` and `files` floors above protect
+    # everything else. What this declaration cannot do is notice a tier that
+    # skipped when it should have run — which is the honest limit of the
+    # format, recorded here so the next reader does not assume it is covered.
+
+external:
+  # NOT self-contained, and saying so is the point. The gate needs a runtime
+  # this repository pins rather than ships, and an npm fetch on a cold
+  # checkout. A declaration that called this self-contained would be describing
+  # a gate nobody has ever run on a clean machine — the same defect as
+  # identity's gate being green over a database nobody had migrated, told the
+  # other way round.
+  selfContained: false
+  requirements:
+    - kind: toolchain
+      # WHY THIS IS A REQUIREMENT AND NOT A DETAIL. `bin/prime`'s third act is
+      # `require bun`, which exits 127 with a sentence naming `mise install`
+      # when the runtime is absent — so without this the gate does not run at
+      # all, and a reader who has only ever run it on a configured machine does
+      # not know that.
+      name: >-
+        bun 1.3.12 on PATH, the pin in mise.toml, package.json's
+        packageManager, and the oven/bun base image. Without it bin/prime exits
+        127 before running a test.
+      satisfy:
+        # A bare name, so this is a claim about THIS MACHINE and the checker
+        # reports it as `gate.requirement-unproven` without moving the exit
+        # code. That severity is correct: the alternative is a checker that is
+        # red on a laptop and green on CI. `bun --version` is precisely the
+        # check `bin/prime` performs itself, so satisfying this requirement
+        # and satisfying the gate's own precondition are the same command.
+        command: [bun, --version]
+        unmet: >-
+          bin/prime exits 127 with "bun not found on PATH" in the message, and
+          no step banner is printed at all
+    - kind: network
+      # WHY "ONCE, ON A COLD CHECKOUT" AND NOT ALWAYS. node_modules/ is
+      # gitignored and populated by the first run; the measurement that
+      # produced the counts in the header was taken on a worktree with no
+      # node_modules at all, and `bun install --frozen-lockfile` is what put
+      # one there before the suite could run. A warm gate touches the network
+      # not at all, so saying "network" flatly would over-claim a requirement
+      # this gate does not always have.
+      name: >-
+        registry.npmjs.org, ONCE, on a cold checkout only — bun install
+        --frozen-lockfile fetches hono, jose, typescript and @types/bun. A
+        warm gate needs no network.
+      satisfy:
+        # A bare name for the same reason as the toolchain above, and the
+        # honest spelling is the command bin/prime itself runs, so satisfying
+        # this and running the gate are the same act on a cold checkout.
+        command: [bun, install, --frozen-lockfile]
+        unmet: >-
+          bun install --frozen-lockfile exits nonzero on a cold checkout with
+          no network, and the suite never starts
+  # NOT required, and named so nobody goes looking for them:
+  #
+  #   * no credential, of any kind. The suite is hermetic by construction:
+  #     `test/fakeIdentity.ts` and `test/jwksServer.ts` are in-process
+  #     stand-ins, the tests mint their own keys with `crypto.getRandomValues`,
+  #     and `.github/workflows/ci.yml` states that no cafaye service is
+  #     contacted and no secret is read. This was measured, not read off the
+  #     workflow: `bin/prime` was run to green above with no environment
+  #     variable of any kind set. Nothing in this declaration's proof would
+  #     print a token, a key or a JWT if it did, and a gate that could is a
+  #     defect to fix rather than a threshold to raise.
+  #   * no Redis, and this one is worth reading twice. The live tier
+  #     (`src/middleware/rateLimitRedisLive.test.ts`, 14 tests) needs a real
+  #     `redis-server`, and it is gated on `GUARD_REDIS_URL`. It is NOT a
+  #     requirement of THIS gate: `bin/prime` never sets that variable, so the
+  #     tier skips by design and the gate is green. Only the `redis` CI job
+  #     sets `GUARD_REDIS_URL` and `GUARD_REDIS_REQUIRED` and forces it.
+  #     Declaring it as a requirement would be over-claiming a dependency the
+  #     gate does not have, and would make `selfContained: false` assert
+  #     something false. It is named in the proof block above with the three
+  #     mechanisms that do police it, and it is the one thing a developer
+  #     running `bin/prime` locally is not exercising.
+  #   * no service, no database, and no filesystem path outside the
+  #     repository. `node_modules/` is written inside the tree and gitignored.
+
+ci:
+  # The workflow, and the argv it runs. Checked TEXTUALLY against the workflow's
+  # `run:` bodies, so a workflow that stops calling the gate becomes
+  # `gate.ci-disagrees` rather than a quiet divergence.
+  workflow: .github/workflows/ci.yml
+  # `bin/prime`, verbatim and unmodified — the `prime` job's step is literally
+  # `run: bin/prime`, and the repository's own rule is that the CI gate is the
+  # same command rather than a CI variant of it. Verified by reading the
+  # workflow, not assumed from the job's name.
+  #
+  # WHAT THIS BLOCK DELIBERATELY DOES NOT CLAIM, because `check_ci` reads one
+  # workflow's `run:` bodies and nothing else: the `ci` job calls kit's
+  # reusable workflow, which runs install, typecheck and test from kit's own
+  # copy of the conventions — the same STEPS, reached by a different command,
+  # and the reason guard keeps a `prime` job at all. The `redis`, `manifest`
+  # and `image` jobs are also outside what this block can see, and all three
+  # check things `bin/prime` does not. That residue is the finding, and
+  # REPORT-guard-09-gate.md is where it is written down; a declaration that
+  # implied CI and the local gate verify the same set would be the false green
+  # this format exists to remove.
+  invokes: [bin/prime]
