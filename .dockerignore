@@ -1,0 +1,29 @@
+# Keep the build context to what the image actually needs. node_modules is
+# reinstalled inside the image (frozen lockfile) and must never leak the host's
+# platform-specific tree into it.
+node_modules
+.git
+.gitignore
+.github
+coverage
+coverage.*
+*.lcov
+
+.env
+.env.*
+!.env.example
+
+# Editor and OS noise
+.DS_Store
+.idea
+.vscode
+
+# Docs and local-only files: not needed to run the service
+README.md
+AGENTS.md
+CLAUDE.md
+CHANGELOG.md
+cafaye.yml
+bin
+docker-compose.yml
+Dockerfile

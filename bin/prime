@@ -1,0 +1,13 @@
+# The gate for a Bun/TypeScript repository in the cafaye org. Install, test.
+#
+#   bin/prime
+#
+# This is the kit TypeScript template adapted to Bun; if kit grows a bun job,
+# follow kit. `bun install` is plain rather than --frozen-lockfile so a local
+# lockfile fix does not need a flag; CI runs the frozen variant.
+set -eu
+
+cd "$(dirname "$0")/.."
+
+bun install
+bun test

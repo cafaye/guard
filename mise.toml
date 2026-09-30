@@ -1,0 +1,13 @@
+# Toolchain pins for guard. The worktree and CI must agree, so the versions
+# live here rather than in whatever the machine happens to have installed.
+#
+# bun 1.3.12 matches the oven/bun base image in the Dockerfile and the
+# `engines.bun` floor in package.json — three places, one number.
+[tools]
+bun = "1.3.12"
+node = "22.12.0"
+
+[env]
+# Keeps `bun run` and `bunx` from inheriting a NODE_ENV that silently changes
+# which dependency tree a script sees.
+NODE_ENV = "development"
