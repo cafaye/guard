@@ -239,13 +239,16 @@ describe("the router reader", () => {
     expect([...surface.mounts.keys()]).toEqual(["ALL /v1/*"]);
   });
 
-  test("every entry the app registered is accounted for by exactly one bucket", () => {
+  test("every entry the app registered is reported, in order", () => {
     const surface = routerSurface(app.routes);
 
-    // Not a count: the claim is that the partition is total, so a reader that
-    // silently dropped an entry cannot pass this.
-    expect(surface.accounted).toEqual(["ALL /v1/*", "GET /healthz"]);
-    expect(surface.unaccounted).toEqual([]);
+    // Element for element against the program's own array, which is the thing
+    // this whole packet is about. A reader that filtered, reordered or retyped an
+    // entry would be agreeing with a smaller version of the truth.
+    expect(surface.entries).toEqual([
+      { method: "GET", path: "/healthz", kind: "operation" },
+      { method: "ALL", path: "/v1/*", kind: "mount" },
+    ]);
   });
 
   test("a route mounted behind middleware is one operation, not two", () => {
@@ -261,6 +264,15 @@ describe("the router reader", () => {
 
     expect([...surface.operations.keys()]).toEqual(["POST /auth/login"]);
     expect(surface.entries).toHaveLength(2);
+  });
+
+  test("a method this reader does not know is raised on, not filed", () => {
+    // Filing it as an operation would put a route in the comparison set nothing
+    // can serve; filing it as a mount would hide it inside a carve-out. Both are
+    // quieter than saying so, which is why this raises.
+    expect(() => surfaceOf([{ method: "PROPFIND", path: "/v1/me" }], "a Hono app")).toThrow(
+      /neither one of get/,
+    );
   });
 });
 

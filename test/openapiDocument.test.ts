@@ -54,6 +54,7 @@ import {
   documentHeader,
   documentOperations,
   infoVersion,
+  MOUNT_METHOD,
   normaliseOperation,
   openapiVersion,
   responseStatuses,
@@ -65,7 +66,7 @@ const DOCUMENT_PATH = "openapi/v1.yaml";
 /** Every `app.use(…)` mount, by the normalised pair the check keys on. */
 const EXCLUSIONS = new Map<string, string>([
   [
-    normaliseOperation("ALL", "/v1/*"),
+    normaliseOperation(MOUNT_METHOD, "/v1/*"),
     "the `/v1/*` prefix itself: the bearer-token gate is mounted on it, and the routing " +
       "packet mounts the pass-through to the services behind guard on it. It is a mount, not " +
       "a route — it has no method and no response of its own, so there is no operation to " +
@@ -73,7 +74,7 @@ const EXCLUSIONS = new Map<string, string>([
       "route added under `/v1/` next year is still required to be in the document.",
   ],
   [
-    normaliseOperation("ALL", "/*"),
+    normaliseOperation(MOUNT_METHOD, "/*"),
     "the whole-app mounts: the API-key gate and the rate limiter, both on `*`. Neither is an " +
       "operation, and each is a different gate, so they collapse onto one key here. Excluded " +
       "as this exact method+path pair; a route at the root is a `GET` or a `POST` and is not " +
@@ -89,14 +90,14 @@ const EXCLUSIONS = new Map<string, string>([
  * process. `rateLimit: {}` is a real limiter over the in-memory store, and
  * `bff` points at an identity that is never called because no request is made.
  */
-const surface = routerSurface(
-  createApp({
-    jwt: { issuer: "https://identity.localhost", audience: "guard" },
-    bff: { identityUrl: "http://identity.invalid:8080" },
-    apiKeys: { keys: memoryApiKeyStore() },
-    rateLimit: {},
-  }).routes,
-);
+const app = createApp({
+  jwt: { issuer: "https://identity.localhost", audience: "guard" },
+  bff: { identityUrl: "http://identity.invalid:8080" },
+  apiKeys: { keys: memoryApiKeyStore() },
+  rateLimit: {},
+});
+
+const surface = routerSurface(app.routes);
 
 const document = readFileSync(fileURLToPath(new URL(`../${DOCUMENT_PATH}`, import.meta.url)), "utf8");
 const documented = documentOperations(document, DOCUMENT_PATH);
@@ -142,16 +143,19 @@ describe("the document is a document core's conventions accept", () => {
   test("the media types it names are the two guard actually emits", async () => {
     // `application/problem+json` is the error envelope and `application/json` is
     // everything else — including the two responses (`404` and `500`) that are
-    // still the v0 `{ error, message }` shape and are recorded as a conflict
-    // below. A third media type here would be a media type no response carries.
-    const named = new Set([...document.matchAll(/^(\s*)application\/([a-z+]+):\s*$/gm)].map((m) => `application/${m[2]}`));
+    // still the v0 `{ error, message }` shape and are recorded as a conflict in
+    // the document's header. A third media type here would be a media type no
+    // response carries.
+    const named = new Set([...document.matchAll(/^\s*application\/([a-z+]+):\s*$/gm)].map((m) => `application/${m[1]}`));
 
     expect([...named].sort()).toEqual(["application/json", "application/problem+json"]);
 
-    // And the two the app really sends, read from the app rather than from this
-    // list, so the assertion is against the program and not against a comment.
-    const app = createApp();
-    expect(app ? (await app.request("/nope")).headers.get("content-type") : null).toContain("application/json");
+    // And the one an unregistered path really gets, read from the app rather than
+    // from this list, so the assertion is against the program and not a comment.
+    const notFound = await createApp().request("/no-such-route");
+
+    expect(notFound.status).toBe(404);
+    expect(notFound.headers.get("content-type")).toContain("application/json");
   });
 });
 
@@ -209,10 +213,23 @@ describe("the error responses, which are the interesting part", () => {
 });
 
 describe("the mount exclusions", () => {
-  test("every entry the app registers is a route or a named mount", () => {
-    // Not a count: the claim is that the partition is total, so a reader that
-    // silently dropped an entry cannot pass this.
-    expect(surface.unaccounted).toEqual([]);
+  test("every entry the app registered is one the reader reported, in order", () => {
+    // Element for element against Hono's own array, which is the thing this whole
+    // packet is about. A reader that filtered, reordered or retyped an entry would
+    // be agreeing with a smaller version of the truth and nothing below could tell.
+    expect(surface.entries).toEqual(
+      app.routes.map((route) => ({
+        method: route.method.toUpperCase(),
+        path: route.path,
+        kind: route.method.toUpperCase() === MOUNT_METHOD ? "mount" : "operation",
+      })),
+    );
+  });
+
+  test("the mounts are the two the header names, and nothing else", () => {
+    // Keyed by method *and* path, so a carve-out cannot cover a second method on
+    // the same path, and the set is compared rather than a count: an addition here
+    // is a change somebody reads rather than a diff line that scrolls past.
     expect([...surface.mounts.keys()].sort()).toEqual([...EXCLUSIONS.keys()].sort());
   });
 
@@ -224,13 +241,13 @@ describe("the mount exclusions", () => {
       expect(surface.mounts.has(key), `the exclusion for ${key} names a mount the app does not register`).toBe(true);
     }
   });
-
   test("the exclusions cover no operation, so they cannot swallow a future route", () => {
     // The failure this packet exists to prevent, stated as a test rather than as a
-    // intention. Every exclusion is `ALL`, and no served operation is: a route
+    // intention. Every exclusion is a mount, and no served operation is: a route
     // added under `/v1/` next year is a `GET` or a `POST` and none of these keys
-    // can match it.
-    for (const [key] of EXCLUSIONS) expect(key.startsWith("ALL ")).toBe(true);
+    // can match it. `MOUNT_METHOD` is Hono's own spelling, read rather than
+    // typed, so this is a claim about how `app.routes` records a mount.
+    for (const [key] of EXCLUSIONS) expect(key.startsWith(`${MOUNT_METHOD} `)).toBe(true);
     for (const key of surface.operations.keys()) expect(EXCLUSIONS.has(key)).toBe(false);
   });
 

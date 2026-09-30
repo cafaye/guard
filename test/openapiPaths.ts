@@ -54,8 +54,12 @@ export type Operation = {
   path: string;
   /** `METHOD /path`, for a failure message. */
   label: string;
-  /** The line it was found on, for a failure message. Document only. */
-  line: number;
+  /**
+   * The line the path starts on. Documents only: `app.routes` is an array, not a
+   * file, so a router operation has no line and `undefined` is the honest answer
+   * rather than a number that points nowhere.
+   */
+  line?: number;
 };
 
 /**
@@ -74,12 +78,15 @@ export type RouterSurface = {
   operations: Map<string, Operation>;
   /** Keyed `METHOD /path`, deduplicated. */
   mounts: Map<string, Mount>;
-  /** Every entry `app.routes` reported, in registration order, tagged. */
+  /**
+   * Every entry `app.routes` reported, in registration order, tagged.
+   *
+   * Kept so the check can compare the reader's output against the program's own
+   * array element for element. A reader that filtered, reordered or retyped an
+   * entry would otherwise be agreeing with a smaller version of the truth, and
+   * nothing downstream could tell.
+   */
   entries: RouterEntry[];
-  /** The keys of `entries`, sorted — so the partition can be shown to be total. */
-  accounted: string[];
-  /** Entries that fell into neither bucket. Always empty, and asserted. */
-  unaccounted: string[];
 };
 
 /** The eight HTTP method names OpenAPI 3.1 names as operations. */
@@ -153,19 +160,23 @@ export function documentOperations(contents: string, name: string): Map<string, 
       );
     }
 
-    const methods = group.filter((line) => line.indent === methodLevel).map((line) => keyOf(line.text));
-    for (const method of methods) {
-      if (pathItemField(method)) continue;
-      if (!isMethod(method)) {
+    // One pass: every key at the operation level is either an operation or a field
+    // of the Path Item Object, and anything else is refused before it can become a
+    // route in the menu.
+    const found: string[] = [];
+    for (const line of group.filter((candidate) => candidate.indent === methodLevel)) {
+      const key2 = keyOf(line.text);
+      if (pathItemField(key2)) continue;
+      if (!isMethod(key2)) {
         throw new Error(
-          `${name}:${group[0].number} — \`${method}\` is not an OpenAPI operation. A key directly ` +
+          `${name}:${group[0].number} — \`${key2}\` is not an OpenAPI operation. A key directly ` +
             `under a path is one of ${METHODS.join(", ")}, or a field of the Path Item Object. ` +
             `Reading it as anything else would put a route in the menu that no client can call.`,
         );
       }
+      found.push(key2);
     }
 
-    const found = methods.filter(isMethod);
     if (found.length === 0) {
       throw new Error(
         `${name}:${group[0].number} — the path \`${key}\` has no operation under it. A path item ` +
@@ -175,16 +186,16 @@ export function documentOperations(contents: string, name: string): Map<string, 
     }
 
     for (const method of found) {
-      const key2 = normaliseOperation(method, key);
-      const previous = operations.get(key2);
+      const operationKey = normaliseOperation(method, key);
+      const previous = operations.get(operationKey);
       if (previous !== undefined) {
         throw new Error(
-          `${name}:${group[0].number} — two operations both read as ${key2}: \`${previous.label}\` and ` +
+          `${name}:${group[0].number} — two operations both read as ${operationKey}: \`${previous.label}\` and ` +
             `\`${method} ${key}\`. They normalise onto one route, so a check that could not see the ` +
             `collision would be blind to it.`,
         );
       }
-      operations.set(key2, {
+      operations.set(operationKey, {
         method: normaliseMethod(method),
         path: key,
         label: `${normaliseMethod(method)} ${key}`,
@@ -321,6 +332,18 @@ export function surfaceOf(routes: readonly { path: string; method: string }[], w
     const key = normaliseOperation(method, route.path);
     const mount = method === MOUNT_METHOD;
 
+    // A method this reader does not know is raised on rather than filed. Filing it
+    // as an operation would put a route in the document's comparison set that
+    // nothing can serve, and filing it as a mount would hide it inside a carve-out.
+    if (!mount && !isMethod(method)) {
+      throw new Error(
+        `${who} registers \`${method} ${route.path}\`, which is neither one of ${METHODS.join(", ")} nor ` +
+          `the \`${MOUNT_METHOD}\` Hono records a middleware mount with. This reader will not guess which ` +
+          `kind of thing that is: a misfiled entry is either a route no client can call or a mount ` +
+          `hiding inside a carve-out.`,
+      );
+    }
+
     entries.push({ method, path: route.path, kind: mount ? "mount" : "operation" });
 
     if (mount) {
@@ -330,16 +353,11 @@ export function surfaceOf(routes: readonly { path: string; method: string }[], w
       // `app.post(path, gate, handler)` arrives twice for one route. Set rather
       // than throw: unlike a document, there is no ambiguity here to refuse — the
       // two entries are the same route reached through two handlers.
-      operations.set(key, { method, path: route.path, label: key, line: 0 });
+      operations.set(key, { method, path: route.path, label: key });
     }
   }
 
-  const accounted = entries.map((entry) => normaliseOperation(entry.method, entry.path));
-  const unaccounted = accounted.filter(
-    (key) => !operations.has(key) && !mounts.has(key),
-  );
-
-  return { operations, mounts, entries, accounted: accounted.sort(), unaccounted };
+  return { operations, mounts, entries };
 }
 
 /** `surfaceOf`, naming `createApp` in the message when it is the thing that is empty. */
