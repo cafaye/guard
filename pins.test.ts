@@ -16,7 +16,9 @@
 // contributor with mise sees. A pin in only one of them is a pin half the
 // contributors lose.
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // The repository root, one level up from this file — and this file sits at the
@@ -91,6 +93,87 @@ describe("the bun pin", () => {
     const compose = read("docker-compose.yml");
     expect(compose).toMatch(/BUN_VERSION:\s*"(\d+\.\d+\.\d+)"/);
     expect(/BUN_VERSION:\s*"(\d+\.\d+\.\d+)"/.exec(compose)?.[1]).toBe(PIN);
+  });
+});
+
+// ## The half above says the pin is one number. This says the gate obeys it.
+//
+// The four files agreeing is a claim about text. Whether `bin/prime` *reads* that
+// number or merely has a bun on PATH is a different claim, and it was false: the
+// gate's only precondition was `command -v bun`, so a bun that is present and
+// wrong — a system install ahead of mise's shims, a global upgrade, a stale CI
+// image — ran the whole gate and failed somewhere else entirely.
+//
+// The failure it produced is the reason this is here. It is not a toolchain
+// error; it is `cannot find module 'hono'`, which names a package, sends the
+// reader to `package.json` and `bun.lock`, and says nothing at all about the
+// runtime that produced it. cafaye-rb's gate failed that way — a Ruby on PATH
+// that was not the one mise had installed — and the lesson is not "add a
+// version check" in the abstract. It is that a gate which cannot name its own
+// preconditions cannot be debugged from its own output.
+//
+// So the check is run here against a fake bun rather than asserted as text: a
+// shell script standing in for the runtime, first on PATH, answering exactly one
+// question. Both directions are checked, because a check that only ever refuses
+// is indistinguishable from a script that is simply broken.
+describe("the gate obeys the pin rather than only needing a bun", () => {
+  /** A `bun` that answers `--version` and is otherwise a no-op. */
+  const fakeBun = (version: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), "guard-fake-bun-"));
+    const path = join(dir, "bun");
+    writeFileSync(path, `#!/bin/sh\n[ "$1" = "--version" ] && echo ${version}\nexit 0\n`, { mode: 0o755 });
+    return dir;
+  };
+
+  /** Run `bin/prime` against a bun reporting `version`, and keep the output. */
+  const primeAgainst = (version: string): { code: number; stdout: string; stderr: string } => {
+    const dir = fakeBun(version);
+    try {
+      // `PATH` first, so this bun wins over whatever mise has shimmed. The rest
+      // of PATH stays: dropping it would make the run fail for want of `bun`
+      // rather than for the version, which is the defect this file is about.
+      const proc = Bun.spawnSync(["./bin/prime"], {
+        cwd: fileURLToPath(root),
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      });
+      return {
+        code: proc.exitCode,
+        stdout: proc.stdout.toString(),
+        stderr: proc.stderr.toString(),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test("a wrong bun fails on the pin, naming both numbers", () => {
+    const run = primeAgainst("1.2.9");
+
+    // 127, the code this script already used for an absent toolchain: the
+    // runtime is the problem, and a wrong one is not a different kind of problem
+    // from a missing one.
+    expect(run.code).toBe(127);
+    // The pin and what was found instead. A message that said only "wrong bun"
+    // would leave the reader to go looking for which wrong.
+    expect(run.stderr).toContain(PIN);
+    expect(run.stderr).toContain("1.2.9");
+    // And it must NOT be the red herring. This is the assertion that matters:
+    // without it, a gate that printed the pin and then a module error would pass.
+    expect(run.stderr).not.toContain("cannot find module");
+    // It refused before doing any work, so no step banner was printed — a gate
+    // that ran the install against the wrong runtime has already wasted the run.
+    expect(run.stdout).not.toContain("bun install");
+  });
+
+  test("the pinned bun is admitted, so the check compares rather than refuses", () => {
+    const run = primeAgainst(PIN);
+
+    expect(run.code).toBe(0);
+    expect(run.stderr).not.toContain("wrong Bun on PATH");
+    // The closing banner names the version, and it is the one the check
+    // admitted — a second reading at the end of the run could disagree with the
+    // check that let the run start.
+    expect(run.stdout).toContain(`prime ok (bun ${PIN})`);
   });
 });
 

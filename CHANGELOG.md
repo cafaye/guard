@@ -8,6 +8,68 @@ dependency versions follow npm's own rules.
 
 ## [Unreleased]
 
+### Changed
+
+- **`core: ^0.1.0` → `^0.2.0`. The declaration was the stale half, not the code.**
+  guard's content was already 0.2-shaped; the constraint was a number nobody
+  re-read. `core` publishes `VERSION` = `0.2.0` (tag `v0.2.0`), and its
+  `core.constraint-unmet` rule resolves a service's declared `core:` against it —
+  so guard failed CI **on its own declaration**, and the failure named the right
+  file. Measured before and after, against core's contract checker:
+
+  ```
+  before   ^0.1.0  exit=1  FAIL core.constraint-unmet
+  after    ^0.2.0  exit=0  OK, 1 warning
+  ```
+
+  This is the check `0.2.0`'s own changelog promised and could not perform. The
+  brief's second claim — that guard publishes no events under core's catalog
+  names — **did not reproduce and is not a defect**: guard has no event surface
+  at all. `consumes: []` is accurate, there is no `exposes.events`, and no bus,
+  outbox or publisher anywhere in `src/`. The 0.2 grammar and catalog accept an
+  empty event surface, which is what a gateway that answers requests and
+  subscribes to nothing should look like. Verified by reading the source, not by
+  inferring it from the manifest.
+
+### Fixed
+
+- **`bin/prime` accepts a bun that is present and wrong.** The gate's only
+  toolchain precondition was `command -v bun`, so a bun from a system install, a
+  global upgrade or a stale CI image — anything ahead of mise's shims on `PATH` —
+  ran the entire gate silently. The failure it produced was a red herring:
+  `cannot find module 'hono'`, which names a *package*, points the reader at
+  `package.json` and `bun.lock`, and says nothing about the runtime that caused
+  it. This is the cafaye-rb lesson, reproduced here on bun: that gate failed on a
+  Ruby that was on `PATH` and was not the one mise installed.
+  - The gate now **names the pin and the version it found**, and exits **127** —
+    the code it already used for an absent toolchain, because a wrong runtime is
+    not a different kind of problem from a missing one. The check runs *before*
+    the install, so nothing is spent before the refusal.
+  - **The pin is read, not written.** `bin/prime` takes it from `package.json`'s
+    `packageManager`, the field bun itself honours as an exact version, so there
+    is no copy of the number in the script to drift. `pins.test.ts` already holds
+    that field, `mise.toml`, the Dockerfile and compose to one number; a sixth
+    copy here would be the only one nothing checks.
+  - A pin that **cannot be read** is also a loud 127, not a skipped check. A gate
+    that cannot find its own precondition cannot be debugged from its own output.
+  - **Both directions are tested**, in `pins.test.ts`, against a stand-in bun
+    first on `PATH` rather than asserted as text: a wrong version must exit 127
+    naming both numbers, must **not** print `cannot find module`, and must not
+    have printed an install banner; the pinned version must be admitted and reach
+    `prime ok (bun 1.3.12)`. A check that only ever refuses is indistinguishable
+    from a script that is simply broken.
+  - The closing banner reports the version the check **admitted**, not a second
+    reading of `--version` at the end of the run — a banner that re-reads the
+    runtime can disagree with the check that let the run start.
+  - **`Dockerfile` / `.dockerignore` / `test/dockerStage.test.ts` follow, in the
+    same commit.** The suite now *executes* `bin/prime`, so the image needs it:
+    `COPY bin ./bin`, `!bin` in `.dockerignore` (a directory needs the negation
+    too, or the context drops everything under it), and `bin/prime` added to
+    `SUITE_INPUTS`. Verified in the built image — both new tests run there, and
+    the CI image-vs-repository diff still reports 19 test files in agreement. A
+    check that runs on the host and not in the image is a check whose absence
+    nobody notices, which is the exact defect `pins.test.ts` was written for.
+
 ### Added
 
 - **`gate.yml` — the gate is now declared rather than discovered.** `bin/prime`
