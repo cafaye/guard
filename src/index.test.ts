@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createApp, runtimeOptions, type ProbeStatus } from "./index";
 import { signToken, startJwksServer, testKey, type JwksServer, type TestKey } from "../test/jwksServer";
+import { strictTable } from "../test/limitTable";
 
 describe("GET /healthz", () => {
   test("200 with the exact ok body", async () => {
@@ -99,7 +100,7 @@ describe("app surface", () => {
   });
 
   test("rate limiting never throttles the probe endpoints", async () => {
-    const app = createApp({ rateLimit: { limit: 1, windowMs: 60_000 } });
+    const app = createApp({ rateLimit: { limits: strictTable(1) } });
 
     for (let i = 0; i < 5; i++) {
       expect((await app.request("/healthz")).status).toBe(200);
@@ -192,7 +193,7 @@ describe("GET /v1/me", () => {
   test("traffic is rate limited, and so is a rejected token", async () => {
     const app = createApp({
       jwt: { issuer: identity.issuer, audience: CLIENT_ID },
-      rateLimit: { limit: 1, windowMs: 60_000 },
+      rateLimit: { limits: strictTable(1) },
     });
 
     expect((await app.request("/v1/me", bearer(await token()))).status).toBe(200);

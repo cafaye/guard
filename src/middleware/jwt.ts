@@ -69,8 +69,18 @@ export type Principal = {
   claims: JWTPayload;
 };
 
-/** Hono context variables, so a handler gets a typed principal. */
-export type AuthEnv = { Variables: { principal: Principal } };
+/**
+ * Hono context variables, so a handler gets a typed principal.
+ *
+ * This is the shape of a *verified request's* context, which two middlewares
+ * populate: this verifier, for a bearer token, and the API-key gate in
+ * `./apiKey` for a machine credential. `apiKeyId` is the other credential's
+ * identity and it lands in the same place, because everything downstream — the
+ * scope gate, the rate-limit key — treats the two the same. `principal` is
+ * declared required and is absent at runtime until something sets it; the only
+ * handlers that read it are behind a gate that either sets it or answers 401.
+ */
+export type AuthEnv = { Variables: { principal: Principal; apiKeyId?: string } };
 
 export type JwtVerifier = {
   /** 401 unless the request carries a token this verifier accepts. */

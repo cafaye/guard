@@ -364,8 +364,67 @@ export async function connectRedis(options: RedisConnectionOptions): Promise<Red
   };
 }
 
-function concat(into: Uint8Array, more: Uint8Array): Uint8Array {
-  const joined = new Uint8Array(into.byteLength + more.byteLength);
+/**
+ * A connection that opens on first use.
+ *
+ * `runtimeOptions` is synchronous and `Bun.connect` is not, so the connection is
+ * deferred rather than awaited. Two things follow, and both are deliberate:
+ *
+ *   * A malformed URL is still a startup error. The URL is parsed here, eagerly,
+ *     because `REDIS_URL=redis//redis` should not wait for the first request to
+ *     discover it.
+ *   * A Redis that is *down* is not a startup error. The store fails open until
+ *     the socket answers and `/readyz` reports `redis: unavailable` meanwhile.
+ *     A gateway that refuses to boot because its counter store is down has turned
+ *     someone else's outage into its own.
+ *
+ * A failed attempt is not cached, so the next request retries: an outage that
+ * ends is an outage a long-lived process recovers from rather than one it
+ * remembers forever.
+ */
+export function lazyRedis(options: RedisConnectionOptions): RedisCommands & { close(): void } {
+  // Parsed and discarded: the point is that a malformed URL throws HERE, at
+  // construction, and not later on the first request.
+  parseRedisUrl(options.url);
+  let connection: (RedisCommands & { close(): void }) | null = null;
+  let opening: Promise<RedisCommands & { close(): void }> | null = null;
+
+  const open = (): Promise<RedisCommands & { close(): void }> => {
+    if (connection) return Promise.resolve(connection);
+
+    opening ??= connectRedis({ url: options.url, timeoutMs: options.timeoutMs }).then(
+      (opened) => {
+        connection = opened;
+        opening = null;
+        return opened;
+      },
+      (error: unknown) => {
+        opening = null;
+        throw error;
+      },
+    );
+
+    return opening;
+  };
+
+  return {
+    async eval(script, keys, args) {
+      return (await open()).eval(script, keys, args);
+    },
+
+    async ping() {
+      return (await open()).ping();
+    },
+
+    close() {
+      connection?.close();
+      connection = null;
+      opening = null;
+    },
+  };
+}
+
+function concat(into: Uint8Array, more: Uint8Array): Uint8Array {  const joined = new Uint8Array(into.byteLength + more.byteLength);
   joined.set(into, 0);
   joined.set(more, into.byteLength);
   return joined;

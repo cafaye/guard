@@ -24,7 +24,7 @@
 // an account id that collides with an address can never share a bucket with it.
 import type { Context } from "hono";
 import { assertNonNegativeInteger } from "./assert";
-import type { Principal } from "./jwt";
+import type { AuthEnv, Principal } from "./jwt";
 
 /** What is known about the caller by the time the limiter reads the context. */
 export type KeySource = {
@@ -67,18 +67,18 @@ export function accountIdOf(principal: Principal | undefined): string | null {
 }
 
 /** The credential from the request context, for a middleware to key on. */
-export function keySourceOf(c: Context<{ Variables: KeyVariables }>, trustedProxies: number): KeySource {
+export function keySourceOf(c: Context<AuthEnv>, trustedProxies: number): KeySource {
   return {
+    // Typed as present, absent at runtime for anonymous traffic: `accountIdOf`
+    // takes undefined, and the only routes that reach a handler are behind a gate
+    // that either set a principal or answered 401.
     accountId: accountIdOf(c.get("principal")),
     apiKeyId: c.get("apiKeyId") ?? null,
     address: clientIp(c, trustedProxies),
   };
 }
 
-export type KeyVariables = {
-  principal?: Principal;
-  apiKeyId?: string;
-};
+export type KeyVariables = AuthEnv["Variables"];
 
 /** What stands in for an address guard could not establish. */
 const UNKNOWN = "unknown";

@@ -21,7 +21,8 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { problem, type Problem } from "../problem";
 import { assertNonNegativeInteger, assertPositiveInteger, assertStructuredKey } from "./assert";
-import { keySourceOf, rateLimitKey, type KeyVariables } from "./limitKey";
+import { keySourceOf, rateLimitKey } from "./limitKey";
+import type { AuthEnv } from "./jwt";
 import type { RateLimitStore } from "./rateLimitTypes";
 
 export type RateLimitOptions = {
@@ -57,7 +58,7 @@ export type RateLimitOptions = {
  * There is no read here before the write, and that is the property the burst test
  * in `rateLimit.test.ts` exists to hold in place.
  */
-export function rateLimit(options: RateLimitOptions): MiddlewareHandler<{ Variables: KeyVariables }> {
+export function rateLimit(options: RateLimitOptions): MiddlewareHandler<AuthEnv> {
   const { store, policy, now = Date.now, exempt = () => false } = options;
   const trustedProxies = options.trustedProxies ?? 0;
   const limits = new Map<string, { limit: number; windowMs: number; policy: string }>();
@@ -91,7 +92,7 @@ export function rateLimit(options: RateLimitOptions): MiddlewareHandler<{ Variab
     if (exempt(new URL(c.req.url).pathname)) return next();
 
     const active = allow(policy(c));
-    const key = rateLimitKey(keySourceOf(c as Context<{ Variables: KeyVariables }>, trustedProxies));
+    const key = rateLimitKey(keySourceOf(c, trustedProxies));
 
     let verdict: Awaited<ReturnType<RateLimitStore["hit"]>>;
     try {

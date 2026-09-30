@@ -28,8 +28,7 @@
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import type { Context, MiddlewareHandler } from "hono";
 import { problem, type Problem } from "../problem";
-import type { Principal } from "./jwt";
-import type { KeyVariables } from "./limitKey";
+import type { AuthEnv, Principal } from "./jwt";
 
 /** What guard hands back when it issues a key. The only time `key` exists. */
 export type IssuedApiKey = {
@@ -203,7 +202,7 @@ export type ApiKeyAuth = {
   /** Whether the request is presenting an API key at all. See `./limitKey`. */
   hasKeyScheme: (c: Context) => boolean;
   /** Authenticates a key, or answers 401. Mount after `hasKeyScheme`. */
-  authenticate: MiddlewareHandler<{ Variables: KeyVariables }>;
+  authenticate: MiddlewareHandler<AuthEnv>;
   /** Mints a key for an account and stores only its hash. */
   issue: (input: { accountId: string; scopes: string[] }) => Promise<IssuedApiKey>;
 };

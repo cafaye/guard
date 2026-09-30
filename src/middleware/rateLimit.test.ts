@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { rateLimit } from "./rateLimit";
 import { memoryRateLimitStore, type RateLimitStore } from "./rateLimitStore";
-import type { Principal } from "./jwt";
+import type { AuthEnv, Principal } from "./jwt";
 
 const WINDOW_MS = 60_000;
 
@@ -19,7 +19,7 @@ function app(options: {
   now?: () => number;
   trustedProxies?: number;
 }) {
-  const a = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
+  const a = new Hono<AuthEnv>();
   const limiter = rateLimit({
     limit: options.limit ?? 5,
     windowMs: options.windowMs ?? WINDOW_MS,
@@ -186,7 +186,7 @@ describe("RateLimit-* headers", () => {
 describe("key derivation, through the middleware", () => {
   /** Puts a verified principal on the context, the way `requireJwt` does. */
   function withJwt(limiter: ReturnType<typeof rateLimit>, accountId: string) {
-    const a = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
+    const a = new Hono<AuthEnv>();
     a.use("*", async (c, next) => {
       c.set("principal", principal(accountId));
       return limiter(c, next);
@@ -210,7 +210,7 @@ describe("key derivation, through the middleware", () => {
     };
 
     const tokenApp = withJwt(rateLimit(options), "acc-42");
-    const keyApp = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
+    const keyApp = new Hono<AuthEnv>();
     keyApp.use("*", async (c, next) => {
       c.set("principal", principal("acc-42"));
       c.set("apiKeyId", "key-7");
@@ -240,7 +240,7 @@ describe("key derivation, through the middleware", () => {
   test("a key alone is limited under its own id, not under the address", async () => {
     const store = memoryRateLimitStore();
     const options = { limit: 2, windowMs: WINDOW_MS, store, trustedProxies: 0, now: () => 0, policy: () => "guard-api" };
-    const a = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
+    const a = new Hono<AuthEnv>();
     a.use("*", (c, next) => {
       // Stands in for the API-key gate: the store turns a presented secret into
       // a key id, and that id is all the limiter is given. The secret itself
@@ -278,7 +278,7 @@ describe("per-route limits", () => {
   function routed() {
     const store = memoryRateLimitStore();
     const policies = new Map<string, number>();
-    const a = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
+    const a = new Hono<AuthEnv>();
 
     a.use("*", async (c, next) => {
       const pathname = new URL(c.req.url).pathname;
