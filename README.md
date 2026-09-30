@@ -357,11 +357,16 @@ a client told `RateLimit-Limit: 600` and then never refused is worse off than on
 told nothing — and Redis is a registered readiness dependency, so `/readyz` says
 `{"deps":{"identity":"ok","redis":"unavailable"}}`.
 
-**The Lua script is reviewed, not executed.** The suite drives the Redis path
-through a line-for-line transcription of the script (`rateLimitRedis.test.ts`) and
-the RESP2 encoder and parser are covered as pure functions, so the client half is
-tested with no server, no socket and no network anywhere in the suite. Running the
-script against a real `redis-server` is `TODO(guard-06)`.
+**The Lua script is executed, in CI.** The default suite drives the Redis path
+through a line-for-line transcription of the script (`rateLimitRedis.test.ts`), and
+the RESP2 encoder and parser are covered as pure functions — so `bin/prime` needs
+no server and no network. A second tier,
+`src/middleware/rateLimitRedisLive.test.ts`, runs the same script against a real
+`redis-server`; it is gated on `GUARD_REDIS_URL`, and the `redis` job in
+`.github/workflows/ci.yml` sets it with `GUARD_REDIS_REQUIRED=true` so a run
+cannot pass by quietly skipping it. `TODO(guard-06)` in
+`src/middleware/rateLimitRedis.ts` — run it in the *deploy* pipeline — is still
+open; CI proves the script, not that a given deployment sets `REDIS_URL`.
 
 ## Errors
 
@@ -455,7 +460,7 @@ framework choice; this one is a correctness choice.
 ## Running it
 
 ```sh
-bin/prime                        # bun install && bun test  (the gate)
+bin/prime                        # frozen install, typecheck, then the suite (the gate)
 bun run src/index.ts             # http://localhost:8080
 curl localhost:8080/healthz
 curl localhost:8080/v1/me        # 401: no bearer token
@@ -490,6 +495,50 @@ has not been told to trust, and `bun run typecheck` reaches `node` (to launch
 in this repository is wrong. Without mise, install Bun 1.3.x and Node 22
 yourself and everything below works unchanged.
 
+## CI
+
+`.github/workflows/ci.yml` calls kit's reusable workflow and adds four jobs of
+its own:
+
+```yaml
+uses: cafaye/kit/.github/workflows/ci.reusable.yml@master
+with:
+  language: bun
+  working-dir: .
+  versions: '{"bun":"1.3.12"}'
+```
+
+| Job          | What it is                                                        | Why kit cannot own it |
+| ------------ | ----------------------------------------------------------------- | --------------------- |
+| `ci`         | kit's `bun` job: frozen install, typecheck, test                   | — it *is* the shared half |
+| `prime`      | runs `bin/prime` itself, then `git diff --exit-code -- bun.lock`     | the gate is guard's command, and the lockfile check needs an install to have run |
+| `redis`      | the live Redis tier, against a real `redis:7.4.1-alpine`            | guard's counter store is guard's dependency |
+| `manifest`   | `cafaye.yml` against core's fetched manifest schema                 | it reaches into `cafaye/core` |
+| `image`      | hadolint, `docker build --target test`, `docker compose build`     | kit's lint tier does not cover Dockerfiles |
+
+**The live tier, and why it is a separate job.** `bin/prime` needs no server: it
+drives the Redis path through a JavaScript transcription of GCRA_LUA.
+`src/middleware/rateLimitRedisLive.test.ts` runs the actual script against a real
+`redis-server`, and it is environment-gated, so without the `redis` job it skips
+and the run is green without having run it. The job sets `GUARD_REDIS_REQUIRED`,
+which turns "no Redis" from a skip into a failure, and a second step parses the
+summary and fails on `0 pass` or any skip — `bun test` exits 0 on a fully skipped
+file, so a green step is not by itself evidence that the tier ran.
+
+To run it locally:
+
+```sh
+docker run -d --rm -p 6379:6379 redis:7.4.1-alpine
+GUARD_REDIS_URL=redis://127.0.0.1:6379 GUARD_REDIS_REQUIRED=true \
+  bun test src/middleware/rateLimitRedisLive.test.ts
+```
+
+**The pin.** Bun 1.3.12 is stated in `package.json` (`packageManager`),
+`mise.toml`, the Dockerfile's `ARG BUN_VERSION`, compose's build arg and this
+workflow's `versions` input. `pins.test.ts` asserts all of them agree, so a bump
+in one fails the gate instead of quietly testing one runtime and shipping another.
+`engines.bun` is deliberately a floor (`>=1.3.0`), not a pin.
+
 ## Not built yet
 
 Each line is a packet, not a plan. The stubs that stand in for them are marked in
@@ -498,12 +547,14 @@ the source with the packet that replaces them.
 - **Routing.** No request is proxied to a service. The service registry that
   decides where a path goes does not exist yet, and `/v1/me` is a placeholder
   for the surface that will replace it.
-- **The Redis script is reviewed, not executed.** `REDIS_URL` selects a real
-  shared store and the client half of it — key names, argument marshalling, reply
-  decoding, the RESP2 encoder and parser — is covered by the suite, but the GCRA
-  Lua itself has never run against a `redis-server`. `TODO(guard-06)` in
-  `src/middleware/rateLimitRedis.ts`: run it in the deploy pipeline. Until then the
-  first deployment to set `REDIS_URL` is the first to execute it.
+- **The Redis script is executed in CI, not in a deployment.** `REDIS_URL`
+  selects a real shared store, and the GCRA Lua now runs against a real
+  `redis-server` on every push (`redis` job; see
+  [Where the counters live](#where-the-counters-live)). What is still unbuilt is
+  the *deploy* half: `TODO(guard-06)` in `src/middleware/rateLimitRedis.ts` is to
+  run the script where `REDIS_URL` is actually configured, so a deployment that
+  sets it is checked against the store it will really use. CI proves the script;
+  nothing yet proves a given deployment points at a working Redis.
 - **A shared API-key store.** Keys are issued, hashed, scoped and revoked, and a
   revoked key is dead on the next request — but the store is a `Map` in one
   process, so a key issued on one replica does not exist on the next and a

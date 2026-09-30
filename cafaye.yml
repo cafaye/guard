@@ -101,10 +101,13 @@ consumes: []
 # >       lives before it can be one.
 # >
 # > Also unverified and worth a ruling: the GCRA Lua in
-# > `src/middleware/rateLimitRedis.ts` is covered by a transcription, not by
-# > execution, so no test in this repository has run it. It belongs in the deploy
-# > pipeline (`TODO(guard-06)`), which is a platform answer rather than a
-# > repository one.
+# > `src/middleware/rateLimitRedis.ts` is now executed against a real
+# > `redis-server` by the `redis` CI job, so the script itself is no longer
+# > covered only by a transcription. What that does NOT answer is (a) or (b)
+# > above: CI proves the script works, not that any deployment configures
+# > `REDIS_URL` at all, and a deployment that does not is an N× limit that stays
+# > invisible. The deploy half is `TODO(guard-06)`, which is a platform answer
+# > rather than a repository one.
 dependencies:
   - name: identity
     # Provisional: no cafaye service has tagged a release yet, so this is the

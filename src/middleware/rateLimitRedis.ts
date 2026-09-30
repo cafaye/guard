@@ -22,8 +22,17 @@
 // a line-for-line transcription of the script and the parity table runs against
 // the Redis path through it, so the client-side code (key names, argument
 // marshalling, reply decoding) is executed and covered; the script body itself is
-// covered by review. TODO(guard-06): run it against a real redis-server in the
-// deploy pipeline.
+// covered by review.
+//
+// A second tier fixes that. `rateLimitRedisLive.test.ts` runs this file's script
+// against a real redis-server, and the `redis` job in `.github/workflows/ci.yml`
+// forces it with `GUARD_REDIS_REQUIRED=true` so it cannot pass by skipping. It
+// found two defects a transcription cannot: Redis truncates a returned Lua number
+// toward zero, and one `-ERR` reply used to wedge this connection permanently.
+//
+// TODO(guard-06) is the deploy half and is still open: run it against the Redis a
+// given deployment actually configures. CI proves the script; nothing yet proves a
+// deployment points `REDIS_URL` at a working store.
 import { assertPositiveInteger } from "./assert";
 import type { RateLimitStore, RateLimitRequest, Verdict } from "./rateLimitTypes";
 
@@ -298,8 +307,9 @@ const DEFAULT_TIMEOUT_MS = 2_000;
  * in README.md — this is forty lines of RESP2, and the client half of it is
  * covered by the pure `encodeCommand`/`parseReply` tests above.
  *
- * The socket itself is the one part of this backend the suite does not execute.
- * TODO(guard-06) as at the top of the file.
+ * The socket itself is the one part of this backend the default suite does not
+ * execute; `rateLimitRedisLive.test.ts` does, against a real server, and it is
+ * how the `-ERR` wedge below was found. TODO(guard-06) as at the top of the file.
  */
 export async function connectRedis(options: RedisConnectionOptions): Promise<RedisCommands & { close(): void }> {
   const target = parseRedisUrl(options.url);
