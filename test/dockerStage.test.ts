@@ -78,6 +78,13 @@ const SUITE_INPUTS = [
   "Dockerfile",
   "docker-compose.yml",
   ".gitignore",
+  // `bin/prime` is executed by `pins.test.ts`, which drives it against a stand-in
+  // bun to prove the gate obeys the pin rather than merely needing a bun. It is
+  // the fifth file the suite reads and does not otherwise need at test time, and
+  // it is listed here for the same reason the other four are: a check that runs
+  // in the image and not on the host is a check whose absence nobody notices,
+  // because the host is where the defect was found.
+  "bin/prime",
 ] as const;
 
 /** CI greps this prefix out of the suite's own output and diffs it against `find`. */

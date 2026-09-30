@@ -62,7 +62,61 @@ version_of() {
   "$@" --version 2>/dev/null | head -n 1 || true
 }
 
+# The pin, read rather than written. It is taken from the one field every tool
+# reads — `packageManager`, which bun itself honours as an exact version — so
+# there is no copy of the number in this script to drift. `pins.test.ts` holds
+# that field, `mise.toml`, the Dockerfile and compose to the same number, and a
+# sixth copy written here would be the only one nothing checks.
+pinned_bun() {
+  sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"bun@\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p' \
+    package.json
+}
+
+# The version that would actually run this script, extracted rather than compared
+# whole. `--version` is free to print a build banner after the number, and a
+# check that trips on that is a check people learn to work around.
+running_bun() {
+  version_of bun | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true
+}
+
+# WHY THIS IS A CHECK AND NOT A HOPEFUL ASSUMPTION. `require bun` proves a bun
+# exists, which is not the same claim. A bun that is present and wrong — a
+# system install ahead of mise's shims, a global upgrade, a stale CI image — is
+# picked up silently and runs the entire gate, and what it produces is a
+# red herring: a module resolution error, a syntax error several frames deep, a
+# suite that passes on a runtime nothing ships. cafaye-rb's gate failed exactly
+# that way, on a Ruby that was on PATH and was not the one mise had installed.
+# So the gate names the pin and the version it found, before the first command
+# that could misreport the cause.
+require_pinned_bun() {
+  local want
+  want="$(pinned_bun)"
+  BUN_VERSION="$(running_bun)"
+
+  if [ -z "$want" ]; then
+    echo "bin/prime: cannot read the Bun pin — package.json states no packageManager \"bun@X.Y.Z\"." >&2
+    echo "  A gate that cannot find the pin cannot check it. That is a defect in this" >&2
+    echo "  repository rather than a missing runtime, and it is reported as loudly as" >&2
+    echo "  one so the two are never confused." >&2
+    exit 127
+  fi
+
+  if [ "$BUN_VERSION" != "$want" ]; then
+    echo "bin/prime: wrong Bun on PATH — this repository pins $want and found ${BUN_VERSION:-an unreadable version}." >&2
+    echo "  bun resolved to $(command -v bun 2>/dev/null || echo 'nothing')." >&2
+    echo "  Activate the pinned runtime before running the gate:" >&2
+    echo "    mise trust && mise install   # installs the pin in mise.toml" >&2
+    echo "    mise exec -- bin/prime       # or run the gate through mise" >&2
+    echo "  Treat the module error this would otherwise produce — \"cannot find" >&2
+    echo "  module\" — as the symptom it is: it names a package, and the cause is" >&2
+    echo "  the runtime. The pin is in mise.toml, package.json's packageManager, the" >&2
+    echo "  Dockerfile and compose, and pins.test.ts fails if those four disagree." >&2
+    exit 127
+  fi
+}
+
 require bun
+require_pinned_bun
 
 step "bun install --frozen-lockfile"
 bun install --frozen-lockfile
@@ -85,5 +139,8 @@ fi
 step "bun test"
 bun test
 
-version="$(version_of bun)"
-step "prime ok (bun ${version:-unknown})"
+# The version printed here is the one `require_pinned_bun` verified, not a second
+# reading of `--version` at the end of the run: a banner that reports whatever
+# bun answers at the last moment is a banner that can disagree with the check
+# that admitted the run in the first place.
+step "prime ok (bun ${BUN_VERSION})"

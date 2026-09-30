@@ -18,7 +18,7 @@
 name: guard
 description: The cafaye public gateway — the only door in, terminating auth and rate limits in front of every service.
 language: typescript
-core: ^0.1.0
+core: ^0.2.0
 
 # guard subscribes to no events. It answers requests; it does not react to a
 # bus. Delivery being at-least-once is someone else's idempotency problem.

@@ -54,7 +54,12 @@ COPY openapi ./openapi
 COPY pins.test.ts ./
 # The four files `pins.test.ts` reads and this repository does not otherwise need
 # at test time. A missing fixture fails loudly; a missing *test file* does not,
-# which is why the list above is a list and not a glob.
+# which is why the list above is a list and not a glob. `bin/` joins them for the
+# same reason: `pins.test.ts` now EXECUTES `bin/prime` against a stand-in bun to
+# prove the gate obeys the toolchain pin, and a script the suite runs but the
+# image does not have is a check that silently stops running in the tree where a
+# wrong toolchain is least likely to be noticed.
+COPY bin ./bin
 COPY mise.toml Dockerfile docker-compose.yml .gitignore ./
 RUN bun test
 

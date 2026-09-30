@@ -42,3 +42,9 @@ Dockerfile
 !.gitignore
 !docker-compose.yml
 !Dockerfile
+# `bin/` for the same reason, and with one more edge: it is a DIRECTORY, so
+# excluding it above excludes everything under it and the Dockerfile's
+# `COPY bin ./bin` cannot name a file inside a directory the context has dropped.
+# The negation has to be here rather than in the Dockerfile, because this file is
+# what decides what the context contains.
+!bin
