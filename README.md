@@ -38,6 +38,38 @@ replaced by routed traffic when the routing packet lands.
 The two shapes an error can take, and why, is a **DECISION NEEDED** — see
 [Errors](#errors).
 
+## The HTTP contract
+
+[`openapi/v1.yaml`](openapi/v1.yaml) is guard's OpenAPI 3.1 document, and it
+describes the seven operations in the table above and nothing else. It is what a
+generated client is built from, so it is held to the router by
+[`test/openapiDocument.test.ts`](test/openapiDocument.test.ts), which reads the
+document and Hono's own `app.routes` and fails if either describes an operation
+the other does not.
+
+Three things about that check are worth knowing before trusting it:
+
+- It compares **method+path pairs**, never counts. A count comparison passes on a
+  rename and fails on a pure addition, which is backwards.
+- Both readers **raise** rather than under-read, and the check asserts each side
+  produced operations at all — two readers that both find nothing agree with each
+  other, and a green check over nothing is worse than no check.
+- The route set comes from the **program's own definitions**, not from a list
+  written out in a test, which is the shape that can only fail for a name
+  somebody remembered.
+
+`/v1/*` and `/*` are in neither side's operation set: they are `app.use(…)`
+mounts, and Hono records every mount with the method `ALL`. They are excluded as
+exact method+path pairs, **not** as a `/v1/` prefix — a route added under `/v1/`
+next year is a `GET` and is not covered by that carve-out. `GET /v1/me` is under
+that prefix and is in the document, which is the standing proof.
+
+The document's header records **seven departures from
+[`core/docs/openapi-conventions.md`](../core/docs/openapi-conventions.md)** as
+open decisions rather than resolving them locally. The most consequential is that
+`cafaye.yml` still has no `exposes` block: the document the omission was waiting
+for now exists, and pointing the platform's `caf gen` at it is the manager's call.
+
 ## Auth
 
 Two surfaces, two credentials, and they do not cross.
@@ -399,6 +431,15 @@ reason that means nothing outside identity.
 > propagation and moves `404`/`500` onto the same envelope in one go. Until then,
 > read the `Content-Type` to tell the two apart.
 
+The shape is declared once, as `components.schemas.Problem` in
+[`openapi/v1.yaml`](openapi/v1.yaml), and every error response in that document
+references it — so a client generated from the document gets the envelope rather
+than a copy of it, and this section and the document cannot describe two
+different things without the reader noticing one of them is out of date. That
+document's `Problem.code` enum is the list above and the two extra slugs
+`cafaye.yml` records; it deliberately does **not** list `not_found` or
+`internal`, because guard produces neither.
+
 ## Configuration
 
 `createApp` takes its configuration as an argument and reads nothing from the
@@ -598,9 +639,11 @@ the source with the packet that replaces them.
   because a browser session has no principal — so a login endpoint is exactly
   where `TRUSTED_PROXIES` being wrong matters most, and a lockout at the edge is a
   later decision.
-- **SSE / streaming pass-through**, **an OpenAPI document and contract tests**
-  (see the `DECISION NEEDED` in [cafaye.yml](cafaye.yml)), and **structured
-  logging**.
+- **SSE / streaming pass-through**, **contract tests against this document**
+  (`caf contract lint` validating real responses against `openapi/v1.yaml`), and
+  **structured logging**. The OpenAPI document itself has shipped — see
+  [The HTTP contract](#the-http-contract) — so the `DECISION NEEDED` in
+  [cafaye.yml](cafaye.yml) is down to the `exposes` block alone.
 
 ## Layout
 
@@ -622,6 +665,10 @@ src/bff/session.ts           SessionStore + the in-memory v0 implementation
 test/fakeIdentity.ts         a stand-in for identity's auth API (never shipped)
 test/jwksServer.ts           a stand-in for identity's JWKS (never shipped)
 test/limitTable.ts           a one-number limit table, for tests
+test/openapiPaths.ts         reads openapi/v1.yaml and Hono's app.routes (never shipped)
+test/openapiPaths.test.ts    the reader's own contract: it raises rather than under-reads
+test/openapiDocument.test.ts the document held to the router, in both directions
+openapi/v1.yaml              the HTTP contract, and the open decisions in its header
 bin/prime                    the gate
 Dockerfile                   oven/bun slim, multi-stage; `docker build --target test` runs the suite in the image
 ```

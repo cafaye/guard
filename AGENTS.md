@@ -35,7 +35,11 @@ src/bff/session.ts      SessionStore + the in-memory v0 implementation
 test/fakeIdentity.ts    a stand-in for identity's auth API; the image never gets it
 test/jwksServer.ts      a stand-in for identity's JWKS; the image never gets it
 test/limitTable.ts      a one-number limit table, for tests
+test/openapiPaths.ts    reads openapi/v1.yaml and Hono's app.routes, and raises
+                        rather than under-reading either
+test/openapiDocument.test.ts  openapi/v1.yaml held to the router, both directions
 pins.test.ts            the bun pin, asserted across every file that states it
+openapi/v1.yaml         the HTTP contract, and the open decisions in its header
 bin/prime               the gate: frozen install, typecheck, bun test
 .github/workflows/ci.yml   kit's reusable workflow, plus the four jobs it cannot own
 ```
@@ -223,3 +227,30 @@ different tree and the run stays green while doing it.
    that catches it is one that asserts a 429, not one that asserts a 200.
 8. Add the row to the README endpoint table, add a `CHANGELOG.md` entry, and
    re-run the three gates.
+
+## Adding a route the OpenAPI document does not know about yet
+
+`test/openapiDocument.test.ts` will fail the moment step 1 adds a route, in one
+direction or the other, and that failure is the gate working. Add the operation to
+`openapi/v1.yaml` in the same commit.
+
+**The document is a judgement call, so the judgement goes in the file.** Three
+things are worth saying out loud in a new operation rather than leaving a reader
+to infer them:
+
+- **The `429`.** Every route except the two in `PROBE_PATHS` can be throttled, so
+  it declares one, and the eight `RateLimit-*` fields go on the success response
+  as well as on the refusal. The test reads the exemption from `PROBE_PATHS` and
+  the header names from `RATE_LIMIT_HEADERS`, so neither is a list somebody
+  typed — a header added to `announce` and not to the document fails the gate.
+- **The error statuses.** Read them out of the handler, not out of habit. A `401`
+  means "this token is not acceptable" and a `503` means "we cannot tell"; an
+  operation that reaches a dependency declares the `503`.
+- **Whether it is authenticated.** `security: []` is a statement, and a genuinely
+  unauthenticated route needs one the way it needs a `summary`: `identity` and
+  `courier` both carry theirs as recorded decisions, and the next reader needs to
+  know it was a choice.
+
+Where guard and `core/docs/openapi-conventions.md` genuinely disagree, record it
+as a `> DECISION NEEDED (guard-NN)` in the **document's header** and keep going.
+Do not pick a side silently, and do not describe the route guard ought to have.
