@@ -26,7 +26,31 @@ consumes: []
 
 # guard builds on identity's signing keys: the JWKS it verifies bearer tokens
 # against belongs to identity. Nothing else is a service-level dependency —
-# hono, bun and the rest are packages and live in package.json (rule 4).
+# hono, jose, bun and the rest are packages and live in package.json (rule 4).
+#
+# > DECISION NEEDED (guard, guard-02): the auth contract guard is built to
+# > differs from `core/docs/openapi-conventions.md` in three places, because
+# > packet guard-02's contract is manager-decided and fixed and this worker
+# > followed it rather than second-guessing it. The gaps are recorded here
+# > because a future packet that widens any of them has to know they exist:
+# >
+# >  1. Algorithms. core accepts RS256 **and** ES256. guard accepts RS256 only,
+# >     pinned in one constant in `src/middleware/jwt.ts`. Widening is a
+# >     one-line change, and it should happen when identity publishes ES256
+# >     keys, not before — accepting an algorithm no key set uses buys nothing
+# >     and widens what a token can ask for.
+# >  2. The scope claim. core's conventions name a `scopes` claim; the guard-02
+# >     contract says a space-separated `scope` string, optional. guard reads
+# >     `scope`. One constant (`SCOPE_CLAIM`) is the whole difference, but until
+# >     it is settled no service can be sure which name to mint.
+# >  3. The default issuer. core documents
+# >     `https://identity.cafaye.com/.well-known/jwks.json`; the packet fixes
+# >     `https://identity.localhost/.well-known/jwks.json` for the compose
+# >     stack. `IDENTITY_ISSUER` overrides it, and the JWKS path is appended to
+# >     the issuer by guard, not written into the variable.
+# >
+# > Requested: a ruling on 1 and 2 from the manager, ideally in the same place
+# > core's conventions are amended, so the contract lives in one file.
 dependencies:
   - name: identity
     # Provisional: no cafaye service has tagged a release yet, so this is the

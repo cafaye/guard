@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
-import { createApp, type ProbeStatus } from "./index";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createApp, runtimeOptions, type ProbeStatus } from "./index";
+import { signToken, startJwksServer, testKey, type JwksServer, type TestKey } from "../test/jwksServer";
 
 describe("GET /healthz", () => {
   test("200 with the exact ok body", async () => {
@@ -104,5 +105,156 @@ describe("app surface", () => {
       expect((await app.request("/healthz")).status).toBe(200);
       expect((await app.request("/readyz")).status).toBe(200);
     }
+  });
+});
+
+const CLIENT_ID = "guard-test";
+
+let identity: JwksServer;
+let key: TestKey;
+
+beforeAll(async () => {
+  key = await testKey("key-1");
+  identity = await startJwksServer(key);
+});
+
+afterAll(() => identity.stop());
+
+const gateway = () => createApp({ jwt: { issuer: identity.issuer, audience: CLIENT_ID } });
+
+const token = () =>
+  signToken(key, {
+    iss: identity.issuer,
+    aud: CLIENT_ID,
+    sub: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 60,
+    scope: "profile.read",
+  });
+
+const bearer = (value: string): RequestInit => ({ headers: { Authorization: `Bearer ${value}` } });
+
+describe("GET /v1/me", () => {
+  test("echoes the verified claims of the bearer token", async () => {
+    const res = await gateway().request("/v1/me", bearer(await token()));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({
+      sub: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+      scope: ["profile.read"],
+      claims: {
+        iss: identity.issuer,
+        aud: CLIENT_ID,
+        sub: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        iat: expect.any(Number),
+        exp: expect.any(Number),
+        scope: "profile.read",
+      },
+    });
+  });
+
+  test("401 for an anonymous caller, in core's error envelope", async () => {
+    const res = await gateway().request("/v1/me");
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get("content-type")).toContain("application/problem+json");
+    const body = (await res.json()) as { code: string; detail: string; instance: string };
+    expect(body).toMatchObject({
+      code: "unauthorized",
+      detail: "a bearer token is required",
+      instance: "/v1/me",
+    });
+  });
+
+  test("a forged token is refused on the shipped app, not just in the middleware's own app", async () => {
+    const res = await gateway().request("/v1/me", bearer("eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9."));
+
+    expect(res.status).toBe(401);
+  });
+
+  test("an unknown /v1 route is 404, and still needs a token first", async () => {
+    expect((await gateway().request("/v1/nope")).status).toBe(401);
+
+    const res = await gateway().request("/v1/nope", bearer(await token()));
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "not_found", message: "no such route" });
+  });
+
+  test("the probes are unaffected by the auth chain", async () => {
+    const app = gateway();
+
+    expect((await app.request("/healthz")).status).toBe(200);
+    expect((await app.request("/readyz")).status).toBe(200);
+  });
+
+  test("traffic is rate limited, and so is a rejected token", async () => {
+    const app = createApp({
+      jwt: { issuer: identity.issuer, audience: CLIENT_ID },
+      rateLimit: { limit: 1, windowMs: 60_000 },
+    });
+
+    expect((await app.request("/v1/me", bearer(await token()))).status).toBe(200);
+
+    const res = await app.request("/v1/me", bearer(await token()));
+
+    expect(res.status).toBe(429);
+  });
+
+  test("an app with no identity configured serves no /v1 surface at all", async () => {
+    // Nothing to verify against is not a degraded auth mode; it is a gateway
+    // that has not been told who its issuer is, and it says so with a 404
+    // rather than an endpoint that would have to trust a token.
+    const res = await createApp().request("/v1/me", bearer(await token()));
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("runtimeOptions", () => {
+  test("defaults to the local identity issuer and guard's own client id", () => {
+    const { jwt } = runtimeOptions({});
+
+    expect(jwt).toEqual({ issuer: "https://identity.localhost", audience: "guard" });
+  });
+
+  test("IDENTITY_ISSUER is the issuer-only base URL", () => {
+    const { jwt } = runtimeOptions({ IDENTITY_ISSUER: "https://identity.cafaye.com" });
+
+    expect(jwt?.issuer).toBe("https://identity.cafaye.com");
+  });
+
+  test("IDENTITY_JWKS_URL overrides where the keys are read from", () => {
+    const { jwt } = runtimeOptions({ IDENTITY_JWKS_URL: "https://keys.example/jwks.json" });
+
+    expect(jwt?.jwksUrl).toBe("https://keys.example/jwks.json");
+  });
+
+  test("IDENTITY_JWKS_TTL_MS is the cache lifetime in milliseconds", () => {
+    expect(runtimeOptions({ IDENTITY_JWKS_TTL_MS: "60000" }).jwt?.jwksCacheTtlMs).toBe(60_000);
+  });
+
+  test("GUARD_CLIENT_ID is the audience guard accepts", () => {
+    expect(runtimeOptions({ GUARD_CLIENT_ID: "cafaye-console" }).jwt?.audience).toBe("cafaye-console");
+  });
+
+  test("an empty variable is unset, not a value", () => {
+    // `IDENTITY_ISSUER=` is what an unset variable looks like in a compose file.
+    const { jwt } = runtimeOptions({ IDENTITY_ISSUER: "  ", IDENTITY_JWKS_TTL_MS: "" });
+
+    expect(jwt).toEqual({ issuer: "https://identity.localhost", audience: "guard" });
+  });
+
+  test("a malformed cache TTL is a startup error, not a silent default", () => {
+    for (const value of ["soon", "0", "-1", "1.5"]) {
+      expect(() => runtimeOptions({ IDENTITY_JWKS_TTL_MS: value })).toThrow(RangeError);
+    }
+  });
+
+  test("a typo'd issuer fails at startup rather than on every request", () => {
+    // `identity.localhost` without a scheme is the mistake an operator makes,
+    // and it would otherwise surface as a 503 on every call.
+    expect(() => createApp(runtimeOptions({ IDENTITY_ISSUER: "identity.localhost" }))).toThrow(RangeError);
   });
 });

@@ -19,6 +19,10 @@ services:
     environment:
       PORT: "8080"
       NODE_ENV: production
+      # Issuer-only base URL — guard appends /.well-known/jwks.json itself. The
+      # default is the compose stack's identity, which is not in this file yet, so
+      # /v1/* answers 503 until it is; /healthz and /readyz do not care.
+      IDENTITY_ISSUER: "https://identity.localhost"
     ports:
       - "8080:8080"
     healthcheck:
