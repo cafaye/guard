@@ -19,11 +19,19 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-// `src/pins.test.ts` -> the repository root. One level up from `src`, not two:
-// `new URL("../..")` resolves against the file, and a directory URL drops the
-// last segment, so `../..` lands in the *parent* of the repository — which is
-// how this test found itself reading a neighbouring service's `package.json`.
-const root = new URL("..", import.meta.url);
+// The repository root, one level up from this file — and this file sits at the
+// root, deliberately, rather than in `src/`. It reads `Dockerfile`, `mise.toml`,
+// `.gitignore` and `docker-compose.yml`, and the Dockerfile's test stage copies
+// `src` and `test` only: a repository-consistency check that cannot run in the
+// image is a check that makes `docker build --target test` red for having been
+// thorough. `bun test` discovers the root, so it still runs everywhere the gate
+// does.
+//
+// One level up, not two. `new URL("../..")` resolves against a *file*, and a
+// directory URL drops the last segment, so `../..` lands in the parent of the
+// repository — which is how this test first found itself reading a neighbouring
+// service's `package.json`.
+const root = new URL(".", import.meta.url);
 const read = (name: string): string => readFileSync(fileURLToPath(new URL(name, root)), "utf8");
 
 /** The one number every other place has to agree with. */
