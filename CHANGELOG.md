@@ -8,7 +8,48 @@ dependency versions follow npm's own rules.
 
 ## [Unreleased]
 
+### Fixed
+
+- **One Redis error reply no longer wedges the connection for the life of the
+  process.** `connectRedis`'s reader caught every `parseReply` failure, consumed
+  no bytes and resolved no waiter, so an `-ERR` was re-parsed on every later chunk
+  and every later command on that connection timed out. Because `lazyRedis` caches
+  a connection and a counter store that cannot answer fails **open**, a gateway
+  that saw one `-ERR` applied no rate limit at all until it restarted — with
+  `/readyz` reporting `redis: unavailable` and nothing in the log saying why. An
+  error reply is part of RESP, not a desync: Redis sends one deliberately and
+  answers the next command normally, so `RedisReplyError` now carries the bytes it
+  used and the reader consumes them and fails exactly one command. `parseReply`'s
+  contract is unchanged — still an `Error`, still throws. Found by executing the
+  GCRA script against a real server, which nothing had done before.
+
 ### Added
+
+- **CI, calling kit's reusable workflow.**
+  `.github/workflows/ci.yml` calls
+  `cafaye/kit/.github/workflows/ci.reusable.yml@master` with `language: bun`, and
+  adds four jobs kit cannot own: `prime` (runs `bin/prime` itself and guards
+  `bun.lock`), `redis` (a real `redis:7.4.1-alpine` for the live tier), `manifest`
+  (validates `cafaye.yml` against core's fetched schema) and `image` (hadolint,
+  `docker build --target test`, `docker compose build`).
+- **The GCRA Lua is executed, in CI.** `rateLimitRedisLive.test.ts` runs the real
+  script against a real `redis-server`; `bin/prime` still needs no server. The
+  tier is gated on `GUARD_REDIS_URL`, and `GUARD_REDIS_REQUIRED=true` plus a
+  summary check turn a skip into a failure — `bun test` exits 0 on a fully skipped
+  file, so a green run is not by itself evidence the tier ran. It found the
+  connection wedge above, and a difference the transcription had hidden: Redis
+  returns a Lua number truncated toward zero, so `resetAt` and `retryAt` come back
+  whole while the in-memory store carries fractions.
+- **`packageManager: "bun@1.3.12"`**, and `pins.test.ts` asserting that the pin
+  agrees across `package.json`, `mise.toml`, `Dockerfile`, `docker-compose.yml`
+  and the workflow. `engines.bun` stays a floor rather than a pin. The pin existed
+  only in `mise.toml`, which a contributor without mise never reads, and the
+  comment above it claimed an agreement nothing checked. `pins.test.ts` also caught
+  `bun.lock` recording the workspace name as `guard-worker-guard-01` — a worktree
+  name from packet guard-01, committed because a lockfile is not a file anyone
+  opens.
+- **`bin/prime` is kit's bun template**: frozen install and typecheck before test,
+  so the local gate and CI's are the same bytes rather than two that can disagree.
 
 - **Sliding-window rate limiting.** GCRA in one atomic step, replacing the
   fixed-window counter. A fixed window hands out `limit` per aligned bucket, so
@@ -24,8 +65,10 @@ dependency versions follow npm's own rules.
   connection opens on first use, so a typo refuses to boot and an outage does not.
   `rateLimitParity.test.ts` runs one behaviour table through both and requires
   byte-identical transcripts, so the trait is proven rather than asserted. No test
-  touches Redis or the network: the Redis path is driven by a transcription of the
-  script, and the RESP2 encoder and parser are tested as pure functions.
+  in the default gate touches Redis or the network: the Redis path is driven by a
+  transcription of the script, and the RESP2 encoder and parser are tested as pure
+  functions. The script itself is executed against a real server by
+  `rateLimitRedisLive.test.ts`, in CI only.
 - **Key derivation in one order: account → API key → address.**
   `src/middleware/limitKey.ts` builds the bucket key from the *verified* principal,
   the id of a key the store looked up, and the client address, and never from a

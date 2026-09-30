@@ -1,12 +1,19 @@
 ---
 # The CI path for guard.
 #
-# NOT kit's reusable workflow, deliberately. kit's ci.reusable.yml has jobs for
-# go, ruby, elixir, python, node and rust, and its `node` job runs `npm ci`
-# against a package-lock.json — guard has neither a package-lock nor npm in the
-# loop, so calling it would fail on day one. The gap is kit's to close (a `bun`
-# job); when it exists, this file collapses to a `uses:` call. Until then this
-# job is the whole gate: frozen install, typecheck, tests.
+# The shared half is kit's reusable workflow: one `uses:` line, and a fix to the
+# toolchain or the linter reaches this repository on its next run without a PR
+# here. The `.github/workflows/` in that path is not decoration — GitHub resolves
+# a reusable workflow at `{owner}/{repo}/.github/workflows/{file}@{ref}` and
+# documents that subdirectories of the workflows directory are not supported, so
+# `cafaye/kit/workflows/ci.reusable.yml@master` resolves to nothing. kit-04 is
+# landing that move in parallel with this packet; until it merges, this file
+# points at a path that does not exist yet on `master` and the `ci` job is
+# red. That is stated rather than worked around: a workflow quietly rewritten to
+# a path that resolves is a workflow nobody reviewed.
+#
+# The jobs below it are guard's, and each one is here because kit cannot own it.
+# kit holds conventions; these reach into this repository's own shape.
 #
 # No secrets, no cafaye service is contacted, nothing is published. Release work
 # is a separate workflow so a red test can never publish.
@@ -22,33 +29,147 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  bun:
-    name: bun
+  # -------------------------------------------------------------- shared half
+  # `language: bun` runs install (frozen), typecheck and test. It is the same
+  # work `bin/prime` does, from kit's copy of the conventions, which is the point
+  # of calling it rather than maintaining a second version here.
+  ci:
+    name: ci (kit)
+    uses: cafaye/kit/.github/workflows/ci.reusable.yml@master
+    with:
+      language: bun
+      working-dir: .
+      # The pin, passed rather than defaulted. kit falls back to 1.3.12, which
+      # happens to be the same number today — and a default that happens to match
+      # is a default nobody is checking. `src/pins.test.ts` asserts this against
+      # package.json, mise.toml, the Dockerfile and compose, so a bump in any of
+      # them fails the gate rather than quietly testing one runtime and shipping
+      # another.
+      versions: '{"bun":"1.3.12"}'
+
+  # ------------------------------------------------- the gate a developer runs
+  # Done means `bin/prime` is the gate and it is the same command locally and in
+  # CI. kit's `bun` job is the same *steps*, but not the same command: a gate
+  # nobody runs is a gate nobody maintains, and this job is what keeps that true.
+  # It also carries the lockfile guard, which has to run *after* an install and
+  # so cannot live inside kit's job.
+  prime:
+    name: bin/prime
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.12"
+      - name: bin/prime
+        run: bin/prime
+      - name: bun.lock is untouched
+        # `bin/prime` runs `bun install --frozen-lockfile`, which fails rather
+        # than rewriting the lock — so this is expected to be a no-op, and that is
+        # exactly why it is here. It is the check that survives a future edit to
+        # bin/prime that drops the flag: a plain `bun install` will happily
+        # resolve a different tree than the one that was committed, and the run
+        # stays green while doing it. Cheap, and it catches drift that is
+        # otherwise invisible.
+        run: |
+          git diff --exit-code -- bun.lock \
+            || { echo "bin/prime moved bun.lock — the gate is no longer frozen"; exit 1; }
+
+  # ------------------------------------------------------------- the live tier
+  # guard's Redis backend is the one part of the suite that a transcription
+  # cannot stand in for: `rateLimitRedis.test.ts` runs a JavaScript copy of
+  # GCRA_LUA, so the script itself has never been executed by any test in this
+  # repository. That tier is environment-gated on a real redis-server, so without
+  # this job it skips and the run is green without having run it.
+  #
+  # It is a separate job, and a separate service, because kit's bun job has no
+  # way to start Redis and must not grow one: a reusable workflow that brought up
+  # a datastore would be a reusable workflow that decides what every service in
+  # the org needs. guard's counter store is guard's dependency.
+  #
+  # `GUARD_REDIS_REQUIRED=true` is the load-bearing part. The tier skips when
+  # GUARD_REDIS_URL is unset, and a skip is a green run that verified nothing —
+  # the failure this packet exists to prevent. Setting the required flag turns
+  # "no Redis" from a skip into a failure, so this job cannot pass without having
+  # executed the script.
+  redis:
+    name: redis (live tier)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        # Pinned, never `latest`: the script's arithmetic is the thing under
+        # test, and it must be the same Redis on every run. 7.4 is the oldest
+        # series with the RESP2/Lua behaviour `parseReply` and `connectRedis`
+        # assume, so a 7.x bump is the safe direction.
+        image: redis:7.4.1-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.12"
       - name: install
-        # Frozen: installs exactly bun.lock and fails when the lock and the
-        # manifest disagree. Plain `bun install` here would let a lockfile drift
-        # reach main unnoticed, which is the whole thing the lockfile is for.
         run: bun install --frozen-lockfile
-      - name: typecheck
-        run: bun run typecheck
-      - name: test
-        run: bun test
-      - name: manifest is valid
-        # cafaye.yml is `additionalProperties: false` against core's schema. The
-        # schema is fetched from the platform repo rather than vendored, so this
-        # checks the manifest against what core publishes today.
+      - name: the live tier runs
+        env:
+          GUARD_REDIS_URL: redis://127.0.0.1:6379
+          GUARD_REDIS_REQUIRED: "true"
+        run: bun test src/middleware/rateLimitRedisLive.test.ts
+      - name: the live tier reported passes, not skips
+        # `bun test` exits 0 on a fully skipped file, so a green step above is
+        # not by itself evidence that the tier ran. This reads the summary and
+        # fails on the shape that verifies nothing: `0 pass` and everything
+        # skipped. It is the difference between a checkmark and a claim, and
+        # PLAN.md §1 is explicit that a skipped test proves nothing.
+        env:
+          GUARD_REDIS_URL: redis://127.0.0.1:6379
+          GUARD_REDIS_REQUIRED: "true"
+        run: |
+          summary="$(bun test src/middleware/rateLimitRedisLive.test.ts 2>&1)"
+          echo "$summary"
+          # `bun test` prints one count per line, so these are anchored whole-line
+          # matches rather than the substring grep that reads fine until the
+          # output has a second `pass` in it.
+          passed="$(printf '%s\n' "$summary" | sed -n 's/^ *\([0-9][0-9]*\) pass *$/\1/p' | tail -n 1)"
+          skipped="$(printf '%s\n' "$summary" | sed -n 's/^ *\([0-9][0-9]*\) skip *$/\1/p' | tail -n 1)"
+          if [ "${passed:-0}" -lt 14 ]; then
+            echo "the live Redis tier ran ${passed:-0} tests, expected 14 — a tier that did not run is not a pass"
+            exit 1
+          fi
+          if [ "${skipped:-0}" -ne 0 ]; then
+            echo "the live Redis tier skipped $skipped tests; CI is the only place it can be forced"
+            exit 1
+          fi
+          echo "live Redis tier: $passed passed, ${skipped:-0} skipped"
+
+  # ------------------------------------------------------------------ manifest
+  # `cafaye.yml` is `additionalProperties: false` against core's frozen schema, so
+  # a field core does not define is a validation failure rather than a comment —
+  # and core is the only repository that knows which fields those are. The schema
+  # is fetched rather than vendored so this tracks what core publishes today
+  # instead of freezing a copy that silently goes stale.
+  #
+  # This cannot live in kit: it reaches into `cafaye/core`, and kit's own scope
+  # rule is that a step reaching into another cafaye repository is deliberately
+  # out of it.
+  manifest:
+    name: manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: cafaye.yml validates against core's schema
         run: |
           curl -fsSL -o cafaye.manifest.schema.json \
             https://raw.githubusercontent.com/cafaye/core/master/schemas/cafaye.manifest.schema.json
-          python3 -m pip install --quiet --disable-pip-version-check jsonschema
+          python3 -m pip install --quiet --disable-pip-version-check jsonschema pyyaml
           python3 - <<'PY'
-          import json, sys
+          import json
           import jsonschema, yaml
 
           schema = json.load(open("cafaye.manifest.schema.json"))
@@ -56,7 +177,32 @@ jobs:
           jsonschema.validate(manifest, schema)
           print("cafaye.yml validates against core's manifest schema")
           PY
-      - name: image builds
-        # The Dockerfile's test stage runs the suite, so this is a second
-        # independent proof that the image is buildable, not a third test run.
+
+  # --------------------------------------------------------------------- image
+  # guard ships a Dockerfile, and a Dockerfile that does not build ships
+  # unverified. kit's lint tier does not cover Dockerfiles, so this is guard's.
+  # It runs two independent things, and the second is not a third test run:
+  # `docker build --target test` executes the suite inside the image, which is a
+  # different tree from the one the host ran in.
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: the Dockerfile is lint-clean
+        # Not skipped, and not left to review. kit-04 found seven Dockerfiles
+        # receiving no lint at all, and hadolint is the obvious candidate — so
+        # this job is what makes guard's one of the linted rather than one of the
+        # seven.
+        run: |
+          docker run --rm -i \
+            -v "$PWD:/work:ro" \
+            hadolint/hadolint:v2.12.0-debian \
+            hadolint --failure-threshold warning /work/Dockerfile
+      - name: the suite passes inside the image
+        # `docker compose build` builds the runtime target only, so it does not
+        # execute the test stage — buildkit skips a stage the target does not
+        # depend on. Naming the target is the whole point.
+        run: docker build --target test --tag cafaye-guard:test .
+      - name: the runtime image builds
         run: docker compose build

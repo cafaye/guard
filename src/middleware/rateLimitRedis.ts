@@ -22,8 +22,17 @@
 // a line-for-line transcription of the script and the parity table runs against
 // the Redis path through it, so the client-side code (key names, argument
 // marshalling, reply decoding) is executed and covered; the script body itself is
-// covered by review. TODO(guard-06): run it against a real redis-server in the
-// deploy pipeline.
+// covered by review.
+//
+// A second tier fixes that. `rateLimitRedisLive.test.ts` runs this file's script
+// against a real redis-server, and the `redis` job in `.github/workflows/ci.yml`
+// forces it with `GUARD_REDIS_REQUIRED=true` so it cannot pass by skipping. It
+// found two defects a transcription cannot: Redis truncates a returned Lua number
+// toward zero, and one `-ERR` reply used to wedge this connection permanently.
+//
+// TODO(guard-06) is the deploy half and is still open: run it against the Redis a
+// given deployment actually configures. CI proves the script; nothing yet proves a
+// deployment points `REDIS_URL` at a working store.
 import { assertPositiveInteger } from "./assert";
 import type { RateLimitStore, RateLimitRequest, Verdict } from "./rateLimitTypes";
 
@@ -192,11 +201,35 @@ export function encodeCommand(args: string[]): Uint8Array {
 export type RespValue = string | number | RespValue[] | null;
 
 /**
+ * A complete error reply, carrying the bytes it used.
+ *
+ * `read` is the whole point. `-ERR` is a *reply*, not a broken stream: Redis sends
+ * one deliberately, keeps the connection in sync and answers the next command
+ * normally. So the socket reader has to be able to tell "this reply said no" —
+ * which fails one command — from "these bytes are half a reply" — which means wait
+ * for more. A bare `Error` carries no such distinction, and a reader that treats
+ * both the same re-parses the same `-ERR` on every subsequent chunk and wedges
+ * the connection for the life of the process.
+ */
+export class RedisReplyError extends Error {
+  readonly read: number;
+
+  constructor(message: string, read: number) {
+    super(message);
+    this.name = "RedisReplyError";
+    this.read = read;
+  }
+}
+
+/**
  * RESP2 reply parsing: one value, and how many bytes it used.
  *
  * An error reply throws. `-ERR` from `EVAL` means the script did not run, and
  * treating that as "no quota used" is a limiter that is open exactly when the
- * thing it depends on is broken.
+ * thing it depends on is broken. It throws `RedisReplyError`, which is still an
+ * `Error` — so `parseReply`'s contract is unchanged for a caller that only wants
+ * to know it failed — and carries `read` for the socket reader, which does need
+ * the difference.
  */
 export function parseReply(bytes: Uint8Array, at = 0): { value: RespValue; read: number } {
   const marker = bytes[at];
@@ -206,7 +239,7 @@ export function parseReply(bytes: Uint8Array, at = 0): { value: RespValue; read:
     case 0x2b: // '+' simple string
       return { value: line, read: line.length + 3 };
     case 0x2d: // '-' error
-      throw new Error(`guard: redis said ${line}`);
+      throw new RedisReplyError(`guard: redis said ${line}`, line.length + 3);
     case 0x3a: // ':' integer
       return { value: integer(line), read: line.length + 3 };
     case 0x24: {
@@ -274,8 +307,9 @@ const DEFAULT_TIMEOUT_MS = 2_000;
  * in README.md — this is forty lines of RESP2, and the client half of it is
  * covered by the pure `encodeCommand`/`parseReply` tests above.
  *
- * The socket itself is the one part of this backend the suite does not execute.
- * TODO(guard-06) as at the top of the file.
+ * The socket itself is the one part of this backend the default suite does not
+ * execute; `rateLimitRedisLive.test.ts` does, against a real server, and it is
+ * how the `-ERR` wedge below was found. TODO(guard-06) as at the top of the file.
  */
 export async function connectRedis(options: RedisConnectionOptions): Promise<RedisCommands & { close(): void }> {
   const target = parseRedisUrl(options.url);
@@ -284,14 +318,22 @@ export async function connectRedis(options: RedisConnectionOptions): Promise<Red
 
   /** Replies not yet claimed by a caller, oldest first. */
   const pending: RespValue[] = [];
-  /** Callers waiting for a reply, oldest first. */
-  const waiting: Array<(value: RespValue) => void> = [];
+  /**
+   * Callers waiting for a reply, oldest first.
+   *
+   * A pair rather than a bare resolver because a command can now fail without the
+   * connection dying: a `-ERR` rejects exactly one entry. Before this, a failed
+   * command was indistinguishable from a dead stream, so the only honest response
+   * the socket reader had was to stop reading — which left every later caller
+   * waiting on a socket that was answering them perfectly well.
+   */
+  const waiting: Array<{ resolve(value: RespValue): void; reject(error: Error): void }> = [];
   let buffered: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   let broken: Error | null = null;
 
   const fail = (error: Error): void => {
     broken = error;
-    while (waiting.length > 0) waiting.shift()?.(null as never);
+    while (waiting.length > 0) waiting.shift()?.reject(error);
   };
 
   const drain = (): void => {
@@ -299,10 +341,17 @@ export async function connectRedis(options: RedisConnectionOptions): Promise<Red
       let parsed: { value: RespValue; read: number };
       try {
         parsed = parseReply(buffered);
-      } catch {
-        // Either more bytes are needed or the stream is nonsense; the socket
-        // handlers tell the two apart, and neither can be acted on here.
-        return;
+      } catch (error) {
+        // Two different things, and conflating them is how this connection used to
+        // wedge. A `RedisReplyError` is a *complete* reply that said no: consume its
+        // bytes, fail the one command that asked for it, and keep reading — Redis
+        // is in sync and the next command gets a real answer. Anything else means
+        // these bytes are half a reply, so wait for the rest and try again.
+        if (!(error instanceof RedisReplyError)) return;
+
+        buffered = buffered.subarray(error.read);
+        waiting.shift()?.reject(error);
+        continue;
       }
 
       buffered = buffered.subarray(parsed.read);
@@ -310,7 +359,7 @@ export async function connectRedis(options: RedisConnectionOptions): Promise<Red
 
       const resolve = waiting.shift();
       if (resolve === undefined) continue;
-      resolve(pending.shift() ?? null);
+      resolve.resolve(pending.shift() ?? null);
     }
   };
 
@@ -337,12 +386,12 @@ export async function connectRedis(options: RedisConnectionOptions): Promise<Red
 
   const send = (args: string[]): Promise<RespValue> =>
     within(
-      new Promise<RespValue>((resolve) => {
+      new Promise<RespValue>((resolve, reject) => {
         if (broken !== null) {
-          resolve(null as never);
+          reject(broken);
           return;
         }
-        waiting.push(resolve);
+        waiting.push({ resolve, reject });
         socket.write(encodeCommand(args));
       }),
       timeoutMs,

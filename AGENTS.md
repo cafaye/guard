@@ -35,7 +35,9 @@ src/bff/session.ts      SessionStore + the in-memory v0 implementation
 test/fakeIdentity.ts    a stand-in for identity's auth API; the image never gets it
 test/jwksServer.ts      a stand-in for identity's JWKS; the image never gets it
 test/limitTable.ts      a one-number limit table, for tests
-bin/prime               the gate: bun install && bun test
+pins.test.ts            the bun pin, asserted across every file that states it
+bin/prime               the gate: frozen install, typecheck, bun test
+.github/workflows/ci.yml   kit's reusable workflow, plus the four jobs it cannot own
 ```
 
 `createApp` is the only thing the tests import, and it must stay importable
@@ -109,8 +111,10 @@ one.
 method and no `peek`, because a read-then-write counter admits N× the limit under
 a burst. Any new implementation is proved by `rateLimitParity.test.ts`, which
 runs one behaviour table through every implementation and requires identical
-transcripts. No test touches Redis or the network; the Redis path is driven by a
-transcription of its Lua and its transport is tested as pure functions.
+transcripts. `bin/prime` touches neither Redis nor the network: the Redis path is
+driven by a transcription of its Lua and its transport is tested as pure
+functions. The script *itself* is executed by `rateLimitRedisLive.test.ts`
+against a real `redis-server`, in the `redis` CI job only — see below.
 
 **In-memory is single-instance only, and is never called a platform limit.** A
 caller gets `limit` per window from *each* replica, so N replicas is an N× limit,
@@ -162,7 +166,7 @@ the file: filling it in needs an OpenAPI document, and specs are manager-owned.
 
 ```sh
 mise trust && mise install   # once per clone, if you use mise — see below
-bin/prime                    # bun install && bun test
+bin/prime                    # frozen install, typecheck, bun test
 bun run typecheck            # tsc --noEmit, must print nothing
 docker build --target test . # the suite inside the image, the same tree CI builds
 docker compose build         # the runtime image itself
@@ -174,6 +178,25 @@ All of them before a commit lands.
 read an untrusted config, and `bun run typecheck` reaches `node` to launch
 `tsc`, so an untrusted `mise.toml` fails the gate for a reason that has nothing
 to do with the code. Run it once per clone before the first gate.
+
+**An environment-gated tier that skips is a green run that verified nothing.**
+`rateLimitRedisLive.test.ts` needs a real `redis-server`, so it skips when
+`GUARD_REDIS_URL` is unset — and `bun test` exits 0 on a fully skipped file. Two
+mechanisms stop that from reading as a pass, and a new gated tier needs both:
+
+- `GUARD_REDIS_REQUIRED=true` makes the tier throw at module load when the URL is
+  unset, rather than skip.
+- The `redis` job parses the summary and fails on `0 pass` or on any skip.
+
+Set the environment and prove the count. A tier added without both is a tier
+nobody will notice is not running.
+
+**CI runs `bin/prime`, not a CI-only variant.** kit's `bun` job runs the same
+*steps* from kit's copy of the conventions, and the `prime` job runs guard's own
+command, so the two cannot drift into disagreeing about what the gate is. The
+`git diff --exit-code -- bun.lock` that follows it is the check that survives a
+future edit dropping `--frozen-lockfile`: a plain `bun install` resolves a
+different tree and the run stays green while doing it.
 
 ## Adding an endpoint
 

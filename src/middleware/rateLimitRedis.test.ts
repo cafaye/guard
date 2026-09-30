@@ -22,9 +22,9 @@ const decoder = new TextDecoder();
  * transcription of GCRA_LUA, and `rateLimitParity.test.ts` runs both stores
  * over the same table.
  *
- * TODO(guard-06): run the Lua against a real redis-server in the deploy
- * pipeline. Until then the script body is verified by review and by this
- * transcription, not by execution.
+ * The script body itself is executed by `rateLimitRedisLive.test.ts`, against a
+ * real redis-server, in the `redis` CI job. This file stays the one that needs
+ * no server, so `bin/prime` is hermetic.
  */
 function fakeRedis(): RedisCommands & { calls: Array<{ key: string; args: string[] }>; size(): number } {
   const keys = new Map<string, number>();
