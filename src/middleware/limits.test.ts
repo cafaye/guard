@@ -105,8 +105,13 @@ describe("resolveLimit — the matching rule", () => {
     expect(resolveLimit(table, "/v1alpha/thing").policy).toBe("default");
   });
 
-  test("the root entry matches everything that nothing else claimed", () => {
-    expect(resolveLimit(table, "/anything/at/all").policy).toBe("root");
+  test("`default` is the fallback, and `/` does not take that job away from it", () => {
+    // A `/` entry in `routes` is an ordinary prefix: it claims the root path and
+    // nothing else. Making it a catch-all would leave `default` unreachable, and
+    // an operator who lowered `default` to stop something would find it doing
+    // nothing at all.
+    expect(resolveLimit(table, "/").policy).toBe("root");
+    expect(resolveLimit(table, "/anything/at/all").policy).toBe("default");
   });
 
   test("the choice does not depend on the order the entries were written in", () => {
