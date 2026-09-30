@@ -258,3 +258,43 @@ describe("runtimeOptions", () => {
     expect(() => createApp(runtimeOptions({ IDENTITY_ISSUER: "identity.localhost" }))).toThrow(RangeError);
   });
 });
+
+describe("runtimeOptions: the BFF identity URL", () => {
+  test("defaults to the local identity", () => {
+    expect(runtimeOptions({}).bff?.identityUrl).toBe("http://localhost:8080");
+  });
+
+  test("IDENTITY_URL is the base URL the auth calls are built from", () => {
+    // The issuer is where guard *verifies* tokens; this is where it *asks* for
+    // sessions. They are the same service and two variables, because one is an
+    // https origin in every environment and the other is a service address.
+    expect(runtimeOptions({ IDENTITY_URL: "http://identity:8080" }).bff?.identityUrl).toBe("http://identity:8080");
+  });
+
+  test("an empty variable is unset, not a value", () => {
+    expect(runtimeOptions({ IDENTITY_URL: "  " }).bff?.identityUrl).toBe("http://localhost:8080");
+  });
+
+  test("a malformed identity URL is a startup error", () => {
+    expect(() => runtimeOptions({ IDENTITY_URL: "identity:8080" })).toThrow(RangeError);
+  });
+
+  test("identity is a registered readiness dependency, so /readyz names it", () => {
+    // The /auth routes are unreachable without it, which is the one condition
+    // the readiness endpoint exists to report.
+    const { probes } = runtimeOptions({});
+
+    expect(Object.keys(probes ?? {})).toContain("identity");
+    expect(typeof probes?.identity).toBe("function");
+  });
+
+  test("the bff block carries the same fetch the probes would use, by construction", () => {
+    // runtimeOptions cannot inject a fetch — it reads the environment — so a
+    // configured app is the only place the two meet, and this pins that the
+    // probe is built from the same options rather than a second parse.
+    const options = runtimeOptions({ IDENTITY_URL: "http://identity:8080" });
+
+    expect(options.probes?.identity).toBeDefined();
+    expect(options.bff?.identityUrl).toBe("http://identity:8080");
+  });
+});

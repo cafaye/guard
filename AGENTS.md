@@ -20,9 +20,13 @@ this repository does not claim.
 ```
 src/index.ts            the app factory (createApp), env parsing, Bun.serve bootstrap
 src/problem.ts          core's error envelope — the one rejection path
+src/probe.ts            what a readiness probe is, so a module can offer one
 src/middleware/jwt.ts   createJwtVerifier — JWKS cache, RS256, requireScope
 src/middleware/rateLimit.ts  in-memory fixed-window limiter
-test/jwksServer.ts      a stand-in identity for the suite; the image never gets it
+src/bff/auth.ts         the /auth surface — identity calls, the cookie, the origin gate
+src/bff/session.ts      SessionStore + the in-memory v0 implementation
+test/fakeIdentity.ts    a stand-in for identity's auth API; the image never gets it
+test/jwksServer.ts      a stand-in for identity's JWKS; the image never gets it
 bin/prime               the gate: bun install && bun test
 ```
 

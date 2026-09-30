@@ -23,6 +23,11 @@ services:
       # default is the compose stack's identity, which is not in this file yet, so
       # /v1/* answers 503 until it is; /healthz and /readyz do not care.
       IDENTITY_ISSUER: "https://identity.localhost"
+      # Where the /auth calls are sent. Set explicitly because the default is
+      # http://localhost:8080, which inside this container is guard itself — a
+      # gateway asking itself for a session. identity is not in this file yet, so
+      # /auth/* answers 503 until it is, the same as /v1/* above.
+      IDENTITY_URL: "http://identity:8080"
     ports:
       - "8080:8080"
     healthcheck:
