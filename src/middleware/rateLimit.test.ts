@@ -27,13 +27,14 @@ function app(options: {
     trustedProxies: options.trustedProxies ?? 0,
     now: options.now ?? (() => 0),
     policy: () => "guard-api",
+    // The exemption `index.ts` uses: a probe is an orchestrator asking whether
+    // the process is alive, and a throttled probe gets the process restarted.
+    exempt: (path) => path === "/healthz",
   });
 
-  a.use("*", async (c, next) => {
-    if (new URL(c.req.url).pathname === "/healthz") return next();
-    return limiter(c, next);
-  });
+  a.use("*", limiter);
   a.get("/", (c) => c.json({ ok: true }));
+  a.get("/healthz", (c) => c.json({ status: "ok" }));
   return a;
 }
 
@@ -70,7 +71,7 @@ describe("the limiter answers", () => {
     expect(body["instance"]).toBe("/");
     expect(body["detail"]).toBe("too many requests for this window");
     expect(typeof body["trace_id"]).toBe("string");
-    expect(blocked.headers.get("x-trace-id")).toBe(body["trace_id"]);
+    expect(blocked.headers.get("x-trace-id")).toBe(body["trace_id"] as string);
   });
 
   test("the probe endpoints are never throttled", async () => {
@@ -87,14 +88,17 @@ describe("RateLimit-* headers", () => {
     const a = app({ limit: 3, windowMs: 30_000 });
     const res = await a.request("/");
 
-    // draft-ietf-httpapi-ratelimit-headers-11 §3: a List of Items, each a
-    // String naming the policy, with `q` for the quota and `w` for the window
-    // in seconds.
+    // draft-ietf-httpapi-ratelimit-headers §3: a List of Items, each a String
+    // naming the policy, with `q` for the quota and `w` for the window in
+    // seconds.
     expect(res.headers.get("RateLimit-Policy")).toBe('"guard-api";q=3;w=30');
 
     // §4: the same policy named, `r` for the quota available and `t` for the
-    // seconds within which that quota may be used.
-    expect(res.headers.get("RateLimit")).toBe('"guard-api";r=2;t=30');
+    // *effective window* — the seconds within which that quota may be used
+    // (§4.1.2). One request of three has bought back one interval, so the
+    // remaining two last one interval and not the whole thirty seconds; the
+    // draft's own B.1.3 example shows `t` counting down the same way.
+    expect(res.headers.get("RateLimit")).toBe('"guard-api";r=2;t=10');
   });
 
   test("the widely-deployed RateLimit-Limit/-Remaining/-Reset trio is still sent", async () => {
@@ -111,12 +115,18 @@ describe("RateLimit-* headers", () => {
     const a = app({ limit: 2, now: () => now });
 
     const first = await a.request("/");
-    // Two of two requests were made instantly, so the bucket is whole again one
-    // interval later — not one window later, which is what a fixed window said.
+    // Two of two are allowed at one per interval, so the allowance is whole
+    // again one interval later — not one window later, which is what a fixed
+    // window said.
     expect(Number(first.headers.get("RateLimit-Reset"))).toBe(30);
 
+    // A minute later the first request has aged out and this one is the first
+    // of a fresh allowance, so the header describes the state *after* it: one
+    // interval in debt, one interval to being whole again.
     now = 30_000;
-    expect(Number((await a.request("/")).headers.get("RateLimit-Reset"))).toBe(0);
+    const second = await a.request("/");
+    expect(Number(second.headers.get("RateLimit-Reset"))).toBe(30);
+    expect(second.headers.get("RateLimit-Remaining")).toBe("1");
   });
 
   test("X-RateLimit-Reset is the absolute epoch instant, not a countdown", async () => {
@@ -149,7 +159,10 @@ describe("RateLimit-* headers", () => {
     const retryAfter = Number(blocked.headers.get("Retry-After"));
 
     expect(Number.isInteger(retryAfter)).toBe(true);
-    expect(retryAfter).toBe(15);
+    // The one request this window allows was spent at t=0 and the next is due
+    // one whole interval later. `Retry-After` is the instant the *refused*
+    // request would be admitted, not half a window and not the whole window.
+    expect(retryAfter).toBe(30);
   });
 
   test("Retry-After is never zero, so a throttled client cannot hot-loop", async () => {
@@ -229,7 +242,12 @@ describe("key derivation, through the middleware", () => {
     const options = { limit: 2, windowMs: WINDOW_MS, store, trustedProxies: 0, now: () => 0, policy: () => "guard-api" };
     const a = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
     a.use("*", (c, next) => {
-      c.set("apiKeyId", "key-7");
+      // Stands in for the API-key gate: the store turns a presented secret into
+      // a key id, and that id is all the limiter is given. The secret itself
+      // never reaches the rate-limit key — the same property
+      // `limitKey.test.ts` pins for the account claim.
+      const secret = c.req.header("authorization")?.replace(/^ApiKey\s+/i, "");
+      c.set("apiKeyId", secret ? `key:${secret}` : undefined);
       return rateLimit(options)(c, next);
     });
     a.get("/", (c) => c.json({ ok: true }));

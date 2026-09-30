@@ -31,7 +31,12 @@ export type Limit = {
 export type LimitTable = {
   /** What a path no entry claims gets. Always consulted, never optional. */
   default: Limit;
-  /** Path prefix -> allowance. Longest matching prefix wins. */
+  /**
+   * Path prefix -> allowance. Longest matching prefix wins. Required, and `{}` is
+   * a valid value: a gateway with one allowance everywhere writes an empty
+   * object rather than a missing field, so a table that has been half-read is a
+   * type error instead of a silent "everything falls back to the default".
+   */
   routes: Record<string, Limit>;
 };
 
@@ -82,7 +87,6 @@ export function limitTable(table: LimitTable): LimitTable {
 
   return checked;
 }
-
 function checkLimit(limit: Limit, field: string): Limit {
   assertPositiveInteger(limit?.limit, `${field}.limit`);
   assertPositiveInteger(limit?.windowMs, `${field}.windowMs`);
@@ -122,7 +126,7 @@ export function resolveLimit(table: LimitTable, path: string): Limit {
   let best: Limit | undefined;
   let bestLength = -1;
 
-  for (const [prefix, limit] of Object.entries(table.routes ?? {})) {
+  for (const [prefix, limit] of Object.entries(table.routes)) {
     if (prefix.length <= bestLength || !claims(prefix, target)) continue;
 
     best = limit;

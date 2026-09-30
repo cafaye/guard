@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { clientIp, hasApiKeyScheme, rateLimitKey, type KeySource } from "./limitKey";
+import {
+  clientIp,
+  hasApiKeyScheme,
+  rateLimitKey,
+  type KeySource,
+  type KeyVariables,
+} from "./limitKey";
 
 /**
  * A Hono app whose context is exactly what guard puts on it by the time the
@@ -8,8 +14,8 @@ import { clientIp, hasApiKeyScheme, rateLimitKey, type KeySource } from "./limit
  * Nothing here is fabricated by the limiter — that is the whole point of the
  * module and the reason its tests build the context rather than a fake it.
  */
-function app(): Hono {
-  const a = new Hono();
+function app(): Hono<{ Variables: KeyVariables }> {
+  const a = new Hono<{ Variables: KeyVariables }>();
   // Hono's default error handler turns a thrown RangeError into a 500, which
   // would hide the one thing this file wants to see: that a bad trusted-proxy
   // count is refused rather than tolerated.

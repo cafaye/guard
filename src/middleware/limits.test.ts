@@ -125,6 +125,6 @@ describe("resolveLimit — the matching rule", () => {
   });
 
   test("an empty table is the default, and does not throw", () => {
-    expect(resolveLimit({ default: { limit: 1, windowMs: 1, policy: "only" } }, "/anything").policy).toBe("only");
+    expect(resolveLimit({ default: { limit: 1, windowMs: 1, policy: "only" }, routes: {} }, "/anything").policy).toBe("only");
   });
 });
