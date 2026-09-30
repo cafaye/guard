@@ -143,6 +143,47 @@ describe("clientIp and the trusted proxy count", () => {
     expect(await read(1, { "x-forwarded-for": "203.0.113.4, , 10.0.0.1" })).toBe("10.0.0.1");
   });
 
+  test("an entry that is not an address is not accepted as one either", async () => {
+    // The three cases the existing filter *does* catch — whitespace, the literal
+    // word `unknown`, a blank hop — are all rejected by an explicit test or an
+    // emptiness check. What is left is the positive filter itself, and it is
+    // looser than the comment above it claims:
+    //
+    //     Only something shaped like an IP literal is accepted
+    //
+    // `[0-9a-f:.%]+` is not that. `deadbeef` is a hex word, not a host; `..` and
+    // `::` are not an address either. All three pass, and each one that passes
+    // becomes a bucket identity, so a caller who can put an entry in the trusted
+    // position mints an unlimited number of allowances by varying a string that
+    // is not an address at all. The rejection that stops this has to be "is this
+    // an address", not "does this contain no spaces".
+    expect(await read(1, { "x-forwarded-for": "deadbeef" })).toBe("unknown");
+    expect(await read(1, { "x-forwarded-for": "abcd" })).toBe("unknown");
+    expect(await read(1, { "x-forwarded-for": "..." })).toBe("unknown");
+    // Octets out of range and short forms are the shape a caller reaches for
+    // when they are trying to look like an address without being one.
+    expect(await read(1, { "x-forwarded-for": "999.1.1.1" })).toBe("unknown");
+    expect(await read(1, { "x-forwarded-for": "1.2.3" })).toBe("unknown");
+    expect(await read(1, { "x-forwarded-for": "203.0.113.4, deadbeef" })).toBe("unknown");
+  });
+
+  test("real addresses in every shape the header carries are still read", async () => {
+    // The filter above is a rejection list of what is not an address. This is the
+    // other half of the same contract: tightening it must not refuse the forms a
+    // real proxy emits, or the fix is a limiter keyed on nothing.
+    expect(await read(1, { "x-forwarded-for": "203.0.113.4" })).toBe("203.0.113.4");
+    expect(await read(1, { "x-forwarded-for": "203.0.113.4:44321" })).toBe("203.0.113.4");
+    expect(await read(1, { "x-forwarded-for": "2001:db8::1" })).toBe("2001:db8::1");
+    expect(await read(1, { "x-forwarded-for": "[2001:db8::1]:44321" })).toBe("2001:db8::1");
+    expect(await read(1, { "x-forwarded-for": "10.0.0.1" })).toBe("10.0.0.1");
+    // `::` and `::1` are legitimately-shaped IPv6 literals, so a fix that
+    // rejected them would be refusing real addresses to stop a spoof.
+    expect(await read(1, { "x-forwarded-for": "::1" })).toBe("::1");
+    // The zone suffix is part of an IPv6 literal and used to be why the filter
+    // had to tolerate `%`.
+    expect(await read(1, { "x-forwarded-for": "fe80::1%eth0" })).toBe("fe80::1%eth0");
+  });
+
   test("a long chain is read from the right, and nothing a caller prepends is ever read", async () => {
     // One trusted proxy means one hop: the rightmost entry is what that proxy
     // saw, so it is the caller's address and every entry to its left is

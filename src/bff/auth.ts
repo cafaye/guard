@@ -122,8 +122,12 @@ export function createBffAuth(options: BffOptions): BffAuth {
     if (response === null) return problem(c, unreachable());
 
     if (response.status === 201) {
-      const user = userOf(await jsonOf(response));
-      return user === null ? problem(c, unusable()) : c.json(user, 201);
+      // Parsed once: a 201 that is not a user is recorded with what it actually
+      // was, and a consumed body read twice reports as absent when it was not.
+      const document = await jsonOf(response);
+      const user = userOf(document);
+
+      return user === null ? problem(c, unusable(`${identityUrl}${IDENTITY.register}`, 201, document)) : c.json(user, 201);
     }
     if (response.status === 422) {
       return problem(c, {
@@ -142,7 +146,7 @@ export function createBffAuth(options: BffOptions): BffAuth {
     // Anything else — a 200, a 500, a body that is not a user — is identity
     // saying something this contract does not cover, and guessing at it would
     // be guard inventing an account.
-    return problem(c, unusable());
+    return problem(c, unusable(`${identityUrl}${IDENTITY.register}`, response.status));
   };
 
   const login: Handler = async (c) => {
@@ -152,13 +156,15 @@ export function createBffAuth(options: BffOptions): BffAuth {
 
     const response = await call(IDENTITY.session, { method: "POST", body: submitted.body });
     if (response === null) return problem(c, unreachable());
-    if (response.status !== 200) return loginRefusal(c, response);
+    if (response.status !== 200) return loginRefusal(c, response, `${identityUrl}${IDENTITY.session}`);
 
     const session = sessionOf(await jsonOf(response));
     // A session with no expiry, an unparseable one, or one already in the past
     // is not a session: the cookie would be set and the very next request would
     // refuse it, which is a login that reports success and signs the user out.
-    if (session === null || session.expiresAt <= Date.now()) return problem(c, unusable());
+    if (session === null || session.expiresAt <= Date.now()) {
+      return problem(c, unusable(`${identityUrl}${IDENTITY.session}`, response.status));
+    }
 
     // Minted here, never accepted from the caller. Fixation needs an id the
     // attacker knows first, and `randomUUID` is the reason they cannot.
@@ -233,10 +239,21 @@ export function createBffAuth(options: BffOptions): BffAuth {
       return problem(c, { status: 401, code: "unauthorized", detail: "the session is no longer valid" });
     }
 
-    if (response.status !== 200) return problem(c, unusable());
+    // Every status that is not a 200 is recorded by `unusable()` — including a
+    // 5xx, which is the case that used to pass through here silently, because
+    // `call()` only logs when the *transport* fails and a dependency that is up
+    // and returning 500 is answering perfectly well.
+    if (response.status !== 200) return problem(c, unusable(`${identityUrl}${IDENTITY.me}`, response.status));
 
-    const user = userOf(await jsonOf(response));
-    return user === null ? problem(c, unusable()) : c.json(user, 200);
+    // Parsed once and reused. A body can only be read once, so the second
+    // `jsonOf` a shape-check would want is null — and reporting "no body" for a
+    // 200 that carried a document is a log line that lies to whoever reads it.
+    const document = await jsonOf(response);
+    const user = userOf(document);
+
+    return user === null
+      ? problem(c, unusable(`${identityUrl}${IDENTITY.me}`, response.status, document))
+      : c.json(user, 200);
   };
 
   const requireSameOrigin: MiddlewareHandler = async (c, next) => {
@@ -299,7 +316,7 @@ function clearCookie(c: Context): void {
  * guess here is how a 423 turns into a 401 and a lockout turns into a retry loop
  * the caller owns.
  */
-function loginRefusal(c: Context, response: Response): Response {
+function loginRefusal(c: Context, response: Response, target: string): Response {
   if (response.status === 401) {
     // One sentence for every refused credential. Varying it per case is how a
     // login endpoint becomes an account-enumeration oracle.
@@ -316,7 +333,7 @@ function loginRefusal(c: Context, response: Response): Response {
     return problem(c, { status: 423, code: "account_locked", detail: "too many failed sign-in attempts for this account" });
   }
 
-  return problem(c, unusable());
+  return problem(c, unusable(target, response.status));
 }
 
 /**
@@ -571,7 +588,44 @@ function unreachable(): Problem {
   return { status: 503, code: "unavailable", detail: "the authentication service could not be reached" };
 }
 
-function unusable(): Problem {
+/**
+ * "identity answered with something guard cannot use", and it is written down.
+ *
+ * The reason this takes the call's method, path and status rather than nothing
+ * is that the alternative was a silent failure. `call()` only logs when the
+ * *transport* fails, so an identity that is up and returning 500 — a broken
+ * deploy, an OOM, a panic, which is what most dependency outages actually look
+ * like — reached this point with no log line at all. The caller got a 503 and
+ * the operator got nothing to correlate it against.
+ *
+ * `target` is the full URL, so the line names *which* dependency and *which*
+ * call, which is what `unreachable()`'s comment has always claimed for the other
+ * 503 and could not deliver for this one.
+ *
+ * Only the URL, the method and the status are recorded. `body`, when a caller
+ * bothers to pass it, is used for *nothing* except to describe its shape — a
+ * dependency's error page is exactly where a credential turns up, and this
+ * repository never writes one down. The shape is here because "answered 500
+ * with no body" and "answered 500 with an HTML stack trace" are different faults
+ * and an operator needs to tell them apart.
+ */
+function unusable(target: string, status: number, body?: unknown): Problem {
+  // `null` is separated from `undefined` and from a document on purpose.
+  // `jsonOf` returns `null` for a body that was not JSON, and `typeof null` is
+  // `"object"` — so the obvious three-way test reports an HTML error page or an
+  // empty body as "a JSON document". That is a log line lying about the shape of
+  // an outage to the operator who has just been sent to look at it.
+  const shape =
+    body === undefined
+      ? "no body"
+      : body === null
+        ? "not JSON"
+        : typeof body === "object"
+          ? "a JSON document"
+          : typeof body;
+
+  console.error(`guard: identity ${target} answered ${status} (${shape}), which this contract does not cover`);
+
   return { status: 503, code: "unavailable", detail: "the authentication service answered with something unusable" };
 }
 
