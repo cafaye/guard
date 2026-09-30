@@ -204,5 +204,43 @@ jobs:
         # execute the test stage — buildkit skips a stage the target does not
         # depend on. Naming the target is the whole point.
         run: docker build --target test --tag cafaye-guard:test .
+      - name: the image ran the repository's tests, not a subset of them
+        # The step above is a green build, and a green build is a claim about a
+        # file set nobody in this job has read. `docker build --target test`
+        # reported 392 tests across 15 files while the host ran 399 across 16:
+        # `pins.test.ts` sits at the repository root and the test stage's COPY
+        # list never named it, so the one test that checks the image and the
+        # repository agree on the toolchain pin was not in the image that ran.
+        #
+        # `test/dockerStage.test.ts` holds the COPY list to the repository and
+        # fails the build locally when they disagree. This step is the other
+        # half, and it is the half that cannot be argued with: the suite emits
+        # every test file it actually discovered (the `GUARD_IMAGE_TEST` lines),
+        # and this compares that set against what `find` says the repository
+        # has. It reads the built image rather than the Dockerfile, so it also
+        # catches a `.dockerignore` rule that drops a directory out of a
+        # `COPY src ./src` — buildkit copies the rest of the directory and stays
+        # green, which no amount of reading the Dockerfile would reveal.
+        #
+        # Counting files and not tests, deliberately. The live Redis tier skips
+        # in here by design, so the pass count legitimately differs from a host
+        # run that has Redis; the file count cannot.
+        run: |
+          set -o pipefail
+          docker run --rm --entrypoint bun cafaye-guard:test test 2>&1 | tee /tmp/in-image.log >/dev/null
+          grep -E '^ *[0-9]+ (pass|skip|fail)$|^Ran [0-9]+ tests' /tmp/in-image.log || true
+          in_image="$(sed -n 's/^GUARD_IMAGE_TEST //p' /tmp/in-image.log | sort -u)"
+          repository="$(find . -name '*.test.ts' -not -path './node_modules/*' -not -path './.git/*' \
+            | sed 's|^\./||' | sort -u)"
+          if [ -z "$in_image" ]; then
+            echo "the image reported no test files at all — it ran nothing, or the report is gone"
+            exit 1
+          fi
+          if [ "$in_image" != "$repository" ]; then
+            echo "the image's test files and the repository's disagree:"
+            diff <(printf '%s\n' "$repository") <(printf '%s\n' "$in_image") || true
+            exit 1
+          fi
+          echo "image and repository agree on $(printf '%s\n' "$in_image" | wc -l | tr -d ' ') test files"
       - name: the runtime image builds
         run: docker compose build

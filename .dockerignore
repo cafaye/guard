@@ -27,3 +27,18 @@ cafaye.yml
 bin
 docker-compose.yml
 Dockerfile
+
+# The four files above that `pins.test.ts` reads, un-ignored so the test stage
+# can copy them. The test stage's COPY list is explicit (see the Dockerfile's
+# strictness notes and `test/dockerStage.test.ts`), so putting them back in the
+# context does not put them in the runtime image — nothing there names them, and
+# `dockerStage.test.ts` fails if that ever stops being true.
+#
+# This is the second half of a bug the first half of that file found: the list
+# could not name these four while this file excluded them, and the symptom is a
+# hard `"/x": not found` at build time rather than a silent skip. Loud beats
+# silent, but a list that names a path the context does not contain is still a
+# wrong list, and the fix belongs in both files.
+!.gitignore
+!docker-compose.yml
+!Dockerfile
