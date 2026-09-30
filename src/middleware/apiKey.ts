@@ -22,9 +22,11 @@
 //
 // TODO(guard-07): the in-memory store here is per process and is what the tests
 // use. A multi-instance deployment needs one shared store behind this same
-// `ApiKeyStore`, the way `RateLimitStore` has two. It is deliberately not
-// written yet rather than written wrongly: a key issued on one replica and
-// invisible on the next one is a credential that fails at random.
+// `ApiKeyStore`, the way `RateLimitStore` has two — and the same packet carries
+// the session store, so "guard's per-process state moves to Redis" is one piece
+// of work. It is deliberately not written yet rather than written wrongly: a key
+// issued on one replica and invisible on the next one is a credential that fails
+// at random.
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import type { Context, MiddlewareHandler } from "hono";
 import { problem, type Problem } from "../problem";

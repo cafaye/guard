@@ -10,6 +10,62 @@ dependency versions follow npm's own rules.
 
 ### Added
 
+- **Sliding-window rate limiting.** GCRA in one atomic step, replacing the
+  fixed-window counter. A fixed window hands out `limit` per aligned bucket, so
+  `limit` requests one millisecond before the edge plus `limit` one millisecond
+  after it is 2× the allowance inside two milliseconds; the boundary case is
+  written out and asserted in both directions.
+- **`RateLimitStore`, with two implementations.** `memoryRateLimitStore` is
+  per-process and says so in its own source, in the README and in the compose
+  notes — N replicas of it is an N× limit. `redisRateLimitStore` counts in
+  Redis with one self-contained Lua script (a read-then-write pair is what admits
+  N× the limit under a burst), keeps its keys under `guard:rl:<prefix>:` and
+  expires its own. `REDIS_URL` selects it; the URL is validated at startup and the
+  connection opens on first use, so a typo refuses to boot and an outage does not.
+  `rateLimitParity.test.ts` runs one behaviour table through both and requires
+  byte-identical transcripts, so the trait is proven rather than asserted. No test
+  touches Redis or the network: the Redis path is driven by a transcription of the
+  script, and the RESP2 encoder and parser are tested as pure functions.
+- **Key derivation in one order: account → API key → address.**
+  `src/middleware/limitKey.ts` builds the bucket key from the *verified* principal,
+  the id of a key the store looked up, and the client address, and never from a
+  header value or an unverified token. Each tier is prefixed so an account id that
+  equals an address cannot share a bucket, and the no-identity case is a named
+  `ip:unknown` rather than a blank key. The account beats the key, so holding both
+  is not a way to double one's rate.
+- **`X-Forwarded-For` is read from the right, and only as far as the operator
+  says.** `TRUSTED_PROXIES` is how many proxies append to the chain, and the
+  address is taken at that hop counting from the end; with the default of `0` the
+  header is not read at all and the socket peer is used. A chain shorter than the
+  trusted run falls back to the peer, because a bucket that groups too many callers
+  is the direction to be wrong in. This replaces keying on the first
+  `X-Forwarded-For` hop, which the caller chose.
+- **`RateLimit-*` response headers**, on allowed and refused requests alike:
+  `RateLimit-Policy` and `RateLimit` as RFC 9651 structured fields per
+  `draft-ietf-httpapi-ratelimit-headers-11` (§3 and §4 — there is no RFC for these
+  fields yet, and the brief's RFC 9331 is L4S), the `RateLimit-Limit` /
+  `-Remaining` / `-Reset` trio the same draft dropped in -08 and deployed clients
+  still parse, and this repository's own `X-RateLimit-*`, whose `-Reset` is an
+  absolute epoch instant. `t` is the effective window per §4.1.2, so it counts
+  down rather than restating `w`. `Retry-After` on a 429 is the instant that
+  request would next be admitted, never zero.
+- **A per-route limit table** (`src/middleware/limits.ts`) with the policy name as
+  the unit of accounting: it is half the counter key, so `/auth/login` (10/min),
+  `/auth/register` (5/min) and the general API surface (600/min) are separate
+  budgets and a caller brute-forcing logins cannot lock out every legitimate
+  sign-up from that address. Longest matching prefix wins, on a path-segment
+  boundary. `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_MS` override the general
+  allowance.
+- **API keys** (`src/middleware/apiKey.ts`): `Authorization: ApiKey <secret>`,
+  accepted on any route a token is. Only the SHA-256 is stored, only twelve
+  characters are ever shown, the secret exists exactly once at issue and cannot be
+  printed again, and `find` is the only lookup so a revoked key is dead on the very
+  next request rather than being returned with a flag. A key sets the same
+  `principal` a token does, so there is one scope gate in the repository rather
+  than two that could disagree. `TODO(guard-07)`: the store is per process.
+- **The counter store is a readiness dependency.** `REDIS_URL` registers
+  `{"deps":{"redis":…}}` from the same connection the store uses, so `/readyz`
+  cannot report a store the limiter is not counting in.
 - App factory `createApp`, exported for tests and the only import the suite
   makes. Importing the module never opens a socket; the `Bun.serve` bootstrap
   is behind `import.meta.main`.
@@ -17,11 +73,7 @@ dependency versions follow npm's own rules.
   dependency.
 - `GET /readyz` — `200 {"deps":{…}}`, or `503` naming the dependencies that are
   not ok. A probe that throws, rejects or answers with anything but `"ok"` counts
-  as `unavailable`; v0 registers no probes, so it is unconditionally ready.
-- `rateLimit` middleware — in-memory fixed-window limiter with wall-clock
-  aligned windows, `X-RateLimit-Limit` / `-Remaining` / `-Reset` on allowed and
-  rejected requests alike, and `Retry-After` on a 429. Invalid `limit` or
-  `windowMs` throws at construction.
+  as `unavailable`.
 - JSON `404` for unknown routes and a flat JSON `500` for unhandled handler
   errors, with the detail logged rather than returned.
 - Rate limiting skips both probe endpoints.
@@ -74,7 +126,7 @@ dependency versions follow npm's own rules.
   and `memorySessionStore`, a `Map` for v0 that drops a record on the read that
   finds it expired and sweeps expired ones once the map passes its bound. A
   session id is `crypto.randomUUID()`, minted on every login and never accepted
-  from a caller. `TODO(guard-04)`: Redis.
+  from a caller. `TODO(guard-07)`: Redis.
 - A same-origin gate on the three mutating `/auth` routes, mounted per route
   rather than on the prefix. `Sec-Fetch-Site: same-origin`, or an `Origin` whose
   host is the one the request was addressed to, or `403` — including
@@ -94,6 +146,28 @@ dependency versions follow npm's own rules.
   logout revokes the token the store is holding. Test stage only.
 
 ### Changed
+
+- The `429` is core's `problem+json` envelope with `code: "rate_limited"`, like
+  every other rejection, instead of `{"error":"rate_limited","message":…}`. The
+  `X-RateLimit-Reset` absolute-instant convention is kept, and `X-RateLimit-Limit`
+  and `X-RateLimit-Remaining` are sent beside it.
+- A counter store that cannot answer now fails **open**, with the cost named in
+  the source and the README: for as long as it is unreachable guard applies no
+  limit. Failing closed would hand a Redis outage to every caller as a `429`. The
+  `RateLimit-*` headers are left off rather than guessed at, and the store is a
+  readiness probe.
+- The limiter is mounted **after** the auth gates, because the bucket is keyed on
+  the strongest identity the request has and that is only known once something has
+  proved who is asking. The cost is stated rather than hidden: a request the auth
+  gate refuses is never counted, because an unverified token must not become a
+  rate-limit key.
+- `AppOptions.rateLimit` is now `{limits, store, trustedProxies, now}` rather than
+  `{limit, windowMs}`, so a deployment can ship a per-route table and a shared
+  store. An app built with no `rateLimit` option still runs unlimited, which is the
+  honest v0 default; `rateLimit: {}` takes the shipped table.
+- `Principal` gained an optional `accountId`, read once from the verified
+  `account_id` claim. A token with no such claim is its own account and the
+  rate-limit key falls back to `sub`.
 
 - `requireJwt` is no longer a stub. Anything downstream of it is authenticated:
   the README's "no request may be treated as authenticated" line is gone with it.
@@ -118,11 +192,25 @@ dependency versions follow npm's own rules.
 
 ### Known gaps
 
-- `404`, `429` and `500` still answer `{ "error": …, "message": … }` with
-  `application/json`, while auth failures use core's `problem+json`. Two shapes in
-  one gateway is a wart, left deliberately: the envelope's `trace_id` has to match
-  an `X-Trace-Id` that exists on every response, which is a trace-propagation
-  middleware that does not exist yet. DECISION NEEDED in the README.
+- `404` and `500` still answer `{ "error": …, "message": … }` with
+  `application/json`, while everything else uses core's `problem+json`. Two shapes
+  in one gateway is a wart, left deliberately: the envelope's `trace_id` has to
+  match an `X-Trace-Id` that exists on every response, which is a trace-propagation
+  middleware that does not exist yet. The `429` moved onto the envelope with the
+  limiter that writes it. DECISION NEEDED in the README.
+- The in-memory rate-limit store is single-instance only: a caller gets its
+  allowance from *each* replica and counts reset on restart. `REDIS_URL` fixes it
+  and the store is behind a trait, but the GCRA Lua has never been executed against
+  a real `redis-server` — the client half is tested, the script body is reviewed.
+  `TODO(guard-06)`.
+- API keys are issued, hashed, scoped and revocable, and a key authenticates on
+  any route a token does, but nothing hands one out: minting a credential is a
+  control-plane action that wants an authenticated account and an audit trail. The
+  store is also per process, so a key issued on one replica is invisible on the
+  next. `TODO(guard-07)`.
+- The address key is only as good as `TRUSTED_PROXIES`, and at the default of `0`
+  every caller behind one NAT shares a bucket. A proxy that overwrites
+  `X-Forwarded-For` is what makes it a real client key.
 - RS256 only, per this packet's contract, where core's conventions also allow
   ES256; and the space-separated `scope` claim, where core's conventions call it
   `scopes`. DECISION NEEDED in `cafaye.yml`.
@@ -130,7 +218,7 @@ dependency versions follow npm's own rules.
   live is not.
 - Sessions are per process and per restart: a browser signed in on a replica that
   goes away is signed out, and a deploy signs everybody out. The `SessionStore`
-  interface is the seam; Redis is `TODO(guard-04)`.
+  interface is the seam; Redis is `TODO(guard-07)`.
 - `GET /auth/me` clears the session cookie when the record is gone or identity
   has withdrawn the session, so a browser stops presenting a cookie that can
   never work again.

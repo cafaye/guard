@@ -58,9 +58,11 @@ const DEFAULT_MAX_SESSIONS = 10_000;
  * replica goes away — which is a real, visible failure and the reason the
  * deploy packet replaces this with Redis.
  *
- * TODO(guard-04): Redis-backed sessions, so a session survives a restart and is
+ * TODO(guard-07): Redis-backed sessions, so a session survives a restart and is
  * shared by every replica. The interface above is the seam; nothing outside this
- * file knows what is behind it.
+ * file knows what is behind it. The same packet carries the shared API-key store
+ * (`./apiKey`) — one deploy story, "guard's per-process state moves to Redis", and
+ * the counter store in `./rateLimitRedis` is the pattern to copy.
  */
 export function memorySessionStore(options: MemorySessionStoreOptions = {}): MemorySessionStore {
   const { now = Date.now, maxSessions = DEFAULT_MAX_SESSIONS } = options;

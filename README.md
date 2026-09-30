@@ -4,27 +4,33 @@ The cafaye public gateway. It is the only door into a cafaye deployment:
 `guard` authenticates callers, limits what they can ask for, and (later)
 forwards requests to the service that owns the work.
 
-**Status: v0 has working auth, a browser login surface, and no routing.** Tokens
-are verified for real against identity's published keys; a browser signs in
-through guard and comes away with a session cookie instead of a token; no
-request is proxied to a service yet, and rate-limit counters and sessions are
-per process. See [Not built yet](#not-built-yet) before relying on anything here.
+**Status: v0 has working auth, a browser login surface, API keys, and no
+routing.** Tokens are verified for real against identity's published keys; a
+browser signs in through guard and comes away with a session cookie instead of a
+token; a script can hold a scoped, revocable API key; no request is proxied to a
+service yet. Rate-limit counters are per process unless `REDIS_URL` names a
+shared store, and sessions are always per process. See
+[Not built yet](#not-built-yet) before relying on anything here.
 
 ## Endpoints
 
-| Method | Path             | Auth        | Rate limited | v0 behaviour                                               |
-| ------ | ---------------- | ----------- | ------------ | ---------------------------------------------------------- |
-| GET    | `/healthz`       | no          | no           | always `200 {"status":"ok"}` — liveness, touches nothing     |
-| GET    | `/readyz`        | no          | no           | `200 {"deps":{…}}`, or `503` if a registered probe is down   |
-| GET    | `/v1/me`         | bearer       | yes          | `200` echoing the verified `{sub, scope, claims}`            |
-| POST   | `/auth/register` | same-origin | yes          | `201 {id, email}`. No session: a registration is not a login |
-| POST   | `/auth/login`    | same-origin | yes          | `200 {expires_at}` + the `__Host-bff-session` cookie         |
-| POST   | `/auth/logout`   | same-origin | yes          | `204`, cookie cleared, identity asked to revoke              |
-| GET    | `/auth/me`       | cookie      | yes          | `200 {id, email}`, proxied to identity with the stored token  |
+| Method | Path             | Auth           | Rate limited | v0 behaviour                                               |
+| ------ | ---------------- | -------------- | ------------ | ---------------------------------------------------------- |
+| GET    | `/healthz`       | no             | **never**    | always `200 {"status":"ok"}` — liveness, touches nothing     |
+| GET    | `/readyz`        | no             | **never**    | `200 {"deps":{…}}`, or `503` if a registered probe is down   |
+| GET    | `/v1/me`         | bearer or key  | yes (`guard-api`) | `200` echoing the verified `{sub, scope, claims}`      |
+| POST   | `/auth/register` | same-origin    | yes (`guard-auth-register`) | `201 {id, email}`. No session: a registration is not a login |
+| POST   | `/auth/login`    | same-origin    | yes (`guard-auth-login`) | `200 {expires_at}` + the `__Host-bff-session` cookie |
+| POST   | `/auth/logout`   | same-origin    | yes (`guard-auth-logout`) | `204`, cookie cleared, identity asked to revoke    |
+| GET    | `/auth/me`       | cookie         | yes (`guard-auth`) | `200 {id, email}`, proxied to identity with the stored token |
 
-`/v1/*` is the API surface: bearer tokens, never a cookie. `/auth/*` is the
-browser surface, and a browser never touches the other one — see
+`/v1/*` is the API surface: bearer tokens and API keys, never a cookie.
+`/auth/*` is the browser surface, and a browser never touches the other one — see
 [BFF auth flow](#bff-auth-flow).
+
+The two probe endpoints are exempt from the limiter, and the reason is not
+tidiness: a throttled probe is an orchestrator that cannot see a healthy process,
+and the restart that follows is worse than the traffic it was guarding against.
 
 `/v1/me` exists to prove the auth chain end to end and forwards nothing. It is
 replaced by routed traffic when the routing packet lands.
@@ -207,6 +213,156 @@ curl -i -X POST localhost:8080/auth/login -H 'origin: https://console.cafaye.com
 curl -i localhost:8080/auth/me --cookie '__Host-bff-session=<the uuid from Set-Cookie>'
 ```
 
+## Rate limiting
+
+The limiter is a **sliding window** (GCRA) counting in **one atomic step** behind
+a `RateLimitStore` trait with two implementations. Three properties matter and
+each has a test that would fail without it.
+
+### Which bucket a request belongs to
+
+The key is derived in one order, and nothing a caller chose is ever in it.
+
+| Order | Bucket key      | Comes from                                                       | Why it is safe                                                                  |
+| ----- | --------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| 1     | `account:<id>`  | the account claim of a **verified** JWT, or the account a key names | Only set by the JWT verifier or the API-key gate, after verification.             |
+| 2     | `apikey:<id>`   | the id of a key the store looked up                              | An id, never the secret. Two keys are two buckets even from one address.          |
+| 3     | `ip:<address>`  | the client address                                                | Only when the deployment says how much of `X-Forwarded-For` to believe.           |
+| 4     | `ip:unknown`    | nothing could be established                                      | A named unknown, not a blank key. Groups more callers than necessary, trusts none. |
+
+- **Never a header value.** `X-Account-Id` is chosen by the caller, and a limiter
+  keyed on it is not a limiter — it is a way to mint a fresh allowance per
+  request. There is no configuration that makes this true instead.
+- **Never an unverified token.** The limiter is mounted *after* the auth gates, so
+  a request it refuses has no identity to key on. A token that fails verification
+  is answered `401` and counted against nothing; the cost of that ordering is that
+  a credential-garbage flood is not counted either, which is affordable because a
+  rejected token costs no key fetch (the algorithm is read off the header first).
+- **The account beats the key.** A caller holding both a token and a key for the
+  same account spends one allowance, so a second credential is not a way to double
+  your rate. A browser session is not an API caller: `/auth/*` authenticates with
+  a cookie and sets no principal, so its traffic is keyed by address and a script
+  holding a key can never spend a person's browser budget.
+- **`X-Forwarded-For` is read from the right.** `TRUSTED_PROXIES=n` means *n*
+  proxies append to the chain, and the address is read at that hop counting from
+  the end; everything to the left of it is something the caller wrote. With
+  `TRUSTED_PROXIES=0` the header is not read at all. A chain shorter than the
+  trusted run falls back to the socket peer, because a bucket that groups too many
+  callers is the direction to be wrong in.
+- **The counter key is a digest.** `rateLimitKey` produces whatever the verified
+  identity contains — an `account_id` claim is whatever identity chose, an IPv6
+  address can carry a `%zone` — and a bucket name becomes a Redis key. The
+  identity is therefore hashed into the key, which makes an unsafe key impossible
+  by construction rather than by a charset somebody remembers, and means a
+  `KEYS guard:rl:*` scan does not yield a list of the accounts hitting the edge.
+
+### Why sliding, and why one step
+
+A fixed window hands out `limit` per aligned bucket of time, so `limit` requests
+one millisecond before the edge plus `limit` one millisecond after it is 2× the
+allowance inside two milliseconds. GCRA spends the allowance continuously instead:
+a caller is thought of as owing `tat - now` of time, each request adds
+`windowMs / limit` of debt, and time passing repays it a piece at a time. The
+boundary case is written out in `rateLimitStore.test.ts` — five requests 1 ms
+before the edge and five 1 ms after it, and the second five are all refused.
+
+Counting and reading are **one call** because a read-then-write limiter admits N×
+the limit under a burst: every replica reads "4 used, limit 5" and all five write
+"5 used". The burst tests fire 200 concurrent requests at a limit of 50 and assert
+exactly 50 admitted and 150 refused, through the in-memory store and through the
+Redis path, and `rateLimitParity.test.ts` runs one behaviour table through both
+implementations and requires byte-identical transcripts.
+
+### What a client is told
+
+There is **no RFC for these fields yet**. The citation is the IETF HTTPAPI working
+group's Standards Track draft,
+[`draft-ietf-httpapi-ratelimit-headers-11`](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/)
+(Polli, Martinez Ruiz, Miller; 23 May 2026), which builds on **RFC 9651**
+(Structured Field Values for HTTP). The brief cited RFC 9331; that is L4S/ECN and
+has nothing to do with rate limiting.
+
+```
+RateLimit-Policy: "guard-api";q=600;w=60     # §3: the policy. q = quota, w = window seconds
+RateLimit: "guard-api";r=598;t=44            # §4: r = available, t = effective window
+RateLimit-Limit: 600                          # the trio the draft dropped in -08,
+RateLimit-Remaining: 598                      # which deployed clients and proxies
+RateLimit-Reset: 44                           # still parse. Seconds, counting down.
+X-RateLimit-Limit: 600                        # this repository's own fields, which
+X-RateLimit-Remaining: 598                    # predates the draft. X-RateLimit-Reset
+X-RateLimit-Reset: 1784557432104              # is an absolute epoch instant.
+Retry-After: 44                               # on a 429 only, in whole seconds
+```
+
+`t` is the **effective window** — the seconds within which the advertised quota
+may be used (§4.1.2) — so it counts down; the draft's own examples move it (`r=60;
+t=58` two seconds into a hundred-a-minute policy). `Retry-After` on a 429 is the
+instant *that* request would next be admitted, never zero, because `Retry-After:
+0` is an instruction to come straight back into a bucket that cannot open for
+another few hundred milliseconds. §7 makes `Retry-After` take precedence when both
+are present, which is the order they are meant to be read in.
+
+A 429 is core's error envelope like every other rejection:
+
+```json
+{ "type": "https://errors.cafaye.com/rate_limited", "title": "Too many requests",
+  "status": 429, "detail": "too many requests for this window",
+  "instance": "/v1/me", "code": "rate_limited", "trace_id": "…" }
+```
+
+### Per-route allowances
+
+A gateway that gives one number to every route cannot be strict where strictness
+is what stops an attack and generous where generosity is what a client needs.
+
+| Policy                | Limit   | Window | Claimed by                        |
+| --------------------- | ------- | ------ | --------------------------------- |
+| `guard-api`           | 600     | 1 min  | `/v1/*` and anything unclaimed     |
+| `guard-auth`          | 60      | 1 min  | any other `/auth/` route           |
+| `guard-auth-login`    | 10      | 1 min  | `POST /auth/login`                 |
+| `guard-auth-register` | 5       | 1 min  | `POST /auth/register`              |
+| `guard-auth-logout`   | 30      | 1 min  | `POST /auth/logout`                |
+| `guard-api-keys`      | 60      | 1 min  | `/v1/api-keys`                     |
+
+Longest matching prefix wins, on a path-segment boundary, so `/v1/` never claims
+`/v1alpha/`. The **policy name is the unit of accounting**, not the route: it is
+half the counter key, so `/auth/login` and `/auth/register` are separate budgets
+and a caller brute-forcing logins cannot lock out every legitimate sign-up from
+that address. The numbers are a starting point, not a measurement — nothing in
+this repository has watched a real caller. `RATE_LIMIT_REQUESTS` and
+`RATE_LIMIT_WINDOW_MS` override the general allowance only; the auth-adjacent
+entries are code in v0, because a table that is half environment and half code is
+a table where lowering `default` is mistaken for having lowered the login limit.
+
+### Where the counters live
+
+| `REDIS_URL` | Store             | Shared across replicas | Survives restart |
+| ----------- | ----------------- | ---------------------- | ---------------- |
+| unset       | in-memory, per process | **no**           | no               |
+| set         | Redis, one GCRA Lua script | yes              | yes              |
+
+**The in-memory store is single-instance only, and that is not a caveat — it is a
+different limit.** A caller gets `limit` per window from *each* replica, so N
+replicas is an N× allowance, and every bucket is lost on restart. Set `REDIS_URL`
+for anything with more than one replica; the URL is parsed at startup so a typo is
+a startup error, and the connection is opened on first use so a Redis that is
+*down* is not a refusal to boot.
+
+**A store that cannot answer fails OPEN**, and the cost is named rather than
+hidden: for as long as the counter store is unreachable, guard applies no limit at
+all. Failing closed would hand a Redis outage to every caller as a `429`, which is
+the same class of mistake as restarting the process on a dependency blip and much
+harder to notice. The `RateLimit-*` headers are left off rather than guessed at —
+a client told `RateLimit-Limit: 600` and then never refused is worse off than one
+told nothing — and Redis is a registered readiness dependency, so `/readyz` says
+`{"deps":{"identity":"ok","redis":"unavailable"}}`.
+
+**The Lua script is reviewed, not executed.** The suite drives the Redis path
+through a line-for-line transcription of the script (`rateLimitRedis.test.ts`) and
+the RESP2 encoder and parser are covered as pure functions, so the client half is
+tested with no server, no socket and no network anywhere in the suite. Running the
+script against a real `redis-server` is `TODO(guard-06)`.
+
 ## Errors
 
 Auth failures use **core's error envelope** — RFC 9457 `problem+json` with
@@ -228,14 +384,15 @@ case, and never identity's own body — it can carry a field name, a host or a
 reason that means nothing outside identity.
 
 > **DECISION NEEDED (guard).** The rest of the surface still answers
-> `{ "error": …, "message": … }` with `application/json` — the `404`, the `429`
-> and the `500`. Two error shapes in one gateway is a wart, and core says no
-> service invents its own error body. It was left alone deliberately: migrating
-> them means touching every response, and the envelope's `trace_id` has to match
-> an `X-Trace-Id` that exists on *every* response, which is a trace-propagation
+> `{ "error": …, "message": … }` with `application/json` — the `404` and the
+> `500`. Two error shapes in one gateway is a wart, and core says no service
+> invents its own error body. The `429` moved onto the envelope with the rate
+> limiter that produces it; what is left is the `404` and the `500`, and moving
+> them means touching every response, and the envelope's `trace_id` has to match an
+> `X-Trace-Id` that exists on *every* response, which is a trace-propagation
 > middleware that does not exist yet. Requested: a `guard-0N` that adds trace-id
-> propagation and moves `404`/`429`/`500` onto the same envelope in one go.
-> Until then, read the `Content-Type` to tell the two apart.
+> propagation and moves `404`/`500` onto the same envelope in one go. Until then,
+> read the `Content-Type` to tell the two apart.
 
 ## Configuration
 
@@ -252,6 +409,11 @@ environment, so a test can build two differently configured apps in one process.
 | `IDENTITY_JWKS_TTL_MS`   | `300000`                    | How long a fetched key set is reused, in milliseconds.              |
 | `GUARD_CLIENT_ID`        | `guard`                     | The `aud` guard accepts — guard's own client id.                   |
 | `IDENTITY_URL`           | `http://localhost:8080`     | identity's base URL for the `/auth` calls: where a session is *requested*, as against `IDENTITY_ISSUER`, which is where tokens are *verified*. http(s), no path. |
+| `RATE_LIMIT_REQUESTS`    | `600`                       | Requests per window on the general allowance. Integer ≥ 1; `0` is a startup error, not "unlimited". |
+| `RATE_LIMIT_WINDOW_MS`   | `60000`                     | Length of that window in milliseconds. Integer ≥ 1. |
+| `TRUSTED_PROXIES`        | `0`                         | How many proxies append to `X-Forwarded-For`, and therefore how much of it is believed. `0` believes none of it and keys on the socket peer. |
+| `REDIS_URL`              | unset                       | `redis://` or `rediss://` — host and port, no path. Set it and the counters are shared by every replica and survive a restart. Unset and they are this process's memory. |
+| `REDIS_PREFIX`           | `guard:rl`                  | Sub-namespace inside guard's own, so two guards or two environments sharing one Redis do not read each other's buckets. |
 
 `IDENTITY_URL` is a second variable for one service on purpose. The issuer is an
 https origin in every environment, including the compose stack; the address guard
@@ -262,6 +424,11 @@ An empty or whitespace-only variable counts as unset, which is what
 `IDENTITY_ISSUER=` in a compose file should mean. A malformed value is a startup
 error, never a silent default: `IDENTITY_JWKS_TTL_MS=0` or `=soon` refuses to
 boot rather than quietly fetching identity on every request.
+
+`REDIS_URL` is validated at startup and connected lazily. The split is
+deliberate: `REDIS_URL=redis//redis` is a mistake worth refusing to boot over,
+while a Redis that is *down* is somebody else's outage, and a gateway that will
+not start without its counter store has turned it into its own.
 
 ## Why Hono and Bun
 
@@ -331,25 +498,41 @@ the source with the packet that replaces them.
 - **Routing.** No request is proxied to a service. The service registry that
   decides where a path goes does not exist yet, and `/v1/me` is a placeholder
   for the surface that will replace it.
-- **Shared rate limits.** The limiter is in-memory and per process: a client gets
-  its allowance from *each* replica, and counts reset on restart. Redis-backed
-  counting is a later packet.
-- **A trustworthy client key.** The limiter keys on the first
-  `X-Forwarded-For` hop, which the caller chooses, so a client can mint a fresh
-  allowance per request until an edge proxy overwrites that header. It is
-  recorded as a known hole, not hidden behind a default.
+- **The Redis script is reviewed, not executed.** `REDIS_URL` selects a real
+  shared store and the client half of it — key names, argument marshalling, reply
+  decoding, the RESP2 encoder and parser — is covered by the suite, but the GCRA
+  Lua itself has never run against a `redis-server`. `TODO(guard-06)` in
+  `src/middleware/rateLimitRedis.ts`: run it in the deploy pipeline. Until then the
+  first deployment to set `REDIS_URL` is the first to execute it.
+- **A shared API-key store.** Keys are issued, hashed, scoped and revoked, and a
+  revoked key is dead on the next request — but the store is a `Map` in one
+  process, so a key issued on one replica does not exist on the next and a
+  deployment behind a load balancer authenticates intermittently. `ApiKeyStore` is
+  the seam; `TODO(guard-07)`. Deliberately absent rather than written wrongly.
+- **No endpoint issues a key.** `createApiKeyAuth` can mint and revoke one, and a
+  key authenticates on any route a token does, but nothing in guard *hands* one
+  out: issuing a credential is a control-plane action that wants an authenticated
+  account, an audit trail and a rate limit of its own (`guard-api-keys` is already
+  in the table for it), and that route is not one this packet was asked to invent.
+  What is missing is the caller, not the capability.
+- **A trustworthy client key still needs an edge proxy.** The address key is only
+  as good as `TRUSTED_PROXIES`, and at the default of `0` guard keys on the socket
+  peer — so every caller behind one NAT shares one bucket. The old behaviour,
+  keying on the first `X-Forwarded-For` hop, was worse: the caller chose it. Both
+  are honest now; neither is a substitute for a proxy that overwrites the header.
 - **Token lifetime.** guard verifies `exp` and `nbf` but enforces no ceiling on
   how long a token may live. core's conventions cap access tokens at 15 minutes;
   whether the edge enforces that or trusts identity to mint short-lived ones is
   a later decision.
 - **ES256.** RS256 only, per this packet's contract. See the DECISION NEEDED in
   [cafaye.yml](cafaye.yml).
-- **One error shape.** `404`, `429` and `500` still answer `{ error, message }`.
-  See [Errors](#errors).
+- **One error shape.** `404` and `500` still answer `{ error, message }`; the
+  `429` moved onto the envelope with the limiter that writes it. See
+  [Errors](#errors).
 - **Shared sessions.** The session store is a `Map` in one process, so a
   browser's session dies with the replica it signed in on and is lost on restart.
   The `SessionStore` interface is the seam; Redis-backed sessions are the deploy
-  packet, marked `TODO(guard-04)` in the source. A CSRF *token* is also not here —
+  packet, marked `TODO(guard-06)` in the source. A CSRF *token* is also not here —
   the origin gate is the defence, and a double-submit token would be a second
   thing to get right for the same protection.
 - **OIDC at the edge.** No redirect flow, no authorization-code exchange, no
@@ -360,9 +543,10 @@ the source with the packet that replaces them.
 - **Password rules, lockout and enumeration** are identity's, not guard's. guard
   forwards the body untouched and maps what comes back: a `423` with its
   `Retry-After`, a `401` with one fixed sentence. Rate limiting is the only
-  brute-force control at the edge, and it keys on the untrustworthy client header
-  above — so a login endpoint in front of guard is exactly where that hole
-  matters, and a lockout at the edge is a later decision.
+  brute-force control at the edge, and on `/auth/*` it keys on the client address
+  because a browser session has no principal — so a login endpoint is exactly
+  where `TRUSTED_PROXIES` being wrong matters most, and a lockout at the edge is a
+  later decision.
 - **SSE / streaming pass-through**, **an OpenAPI document and contract tests**
   (see the `DECISION NEEDED` in [cafaye.yml](cafaye.yml)), and **structured
   logging**.
@@ -374,11 +558,19 @@ src/index.ts                 createApp + runtimeOptions + the Bun.serve bootstra
 src/problem.ts               core's error envelope, the one rejection path
 src/probe.ts                 what a readiness probe is
 src/middleware/jwt.ts        createJwtVerifier — RS256, JWKS cache, scopes
-src/middleware/rateLimit.ts  in-memory fixed-window limiter
+src/middleware/limitKey.ts   which bucket a request is: account > api key > address
+src/middleware/limits.ts     the per-route allowance table
+src/middleware/rateLimit.ts  the limiter: key, policy, headers, 429, fail-open
+src/middleware/rateLimitTypes.ts   the RateLimitStore contract
+src/middleware/rateLimitStore.ts   GCRA in memory, per process
+src/middleware/rateLimitRedis.ts   GCRA in Redis, one Lua script, plus RESP2
+src/middleware/apiKey.ts     API keys: issue, authenticate, revoke
+src/middleware/assert.ts     configuration checks, one RangeError each
 src/bff/auth.ts              the /auth surface: identity calls, the cookie, the origin gate
 src/bff/session.ts           SessionStore + the in-memory v0 implementation
 test/fakeIdentity.ts         a stand-in for identity's auth API (never shipped)
 test/jwksServer.ts           a stand-in for identity's JWKS (never shipped)
+test/limitTable.ts           a one-number limit table, for tests
 bin/prime                    the gate
 Dockerfile                   oven/bun slim, multi-stage; `docker build --target test` runs the suite in the image
 ```
