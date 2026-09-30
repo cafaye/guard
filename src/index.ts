@@ -60,8 +60,12 @@ export type AppOptions = {
  * Liveness and readiness answer even when the limiter is exhausted: a throttled
  * probe is an orchestrator that cannot see a healthy process, and the restart
  * that follows is worse than the traffic it was protecting against.
+ *
+ * Exported because the OpenAPI document's `429` story depends on it: those two
+ * operations are the only ones in `openapi/v1.yaml` with no `429`, and that is a
+ * claim about *this* set rather than a list somebody typed into a YAML file.
  */
-const PROBE_PATHS = new Set(["/healthz", "/readyz"]);
+export const PROBE_PATHS = new Set(["/healthz", "/readyz"]);
 
 /** The audience guard accepts when nothing says otherwise: guard itself. */
 const DEFAULT_CLIENT_ID = "guard";

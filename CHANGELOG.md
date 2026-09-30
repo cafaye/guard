@@ -25,6 +25,56 @@ dependency versions follow npm's own rules.
 
 ### Added
 
+- **`openapi/v1.yaml`, and a test that holds it to the router in both
+  directions.** guard was the only service in the fleet with no OpenAPI document,
+  so it was the one surface a generated client could not describe. The document is
+  3.1.0 at `info.version: 1.0.0` — a new document, so there is no compatibility
+  promise to keep — and it covers all seven routes `createApp` registers: the two
+  probes, `GET /v1/me`, and the four `/auth` browser operations.
+  - **The refusals are documented, not just the successes.** Every non-2xx
+    response is `application/problem+json` and the shape is declared **once**, as
+    `components.schemas.Problem`, with every error response referencing it — a
+    document that only describes the happy path is the usual way an OpenAPI file
+    becomes a lie, and refusing requests is most of what this service does. The
+    `429` carries the whole rate-limit family: `RateLimit-Policy`, `RateLimit`,
+    the un-prefixed trio, the `X-RateLimit-*` trio and `Retry-After`. The family is
+    on the success responses too, because a client that renders a quota meter
+    reads it from a `200`.
+  - **The header says what the document leaves out, and how.** `ALL /v1/*` and
+    `ALL /*` are `app.use(…)` mounts, not routes: Hono records every mount with the
+    method `ALL`, so they are excluded as **exact method+path pairs** and never as
+    a `/v1/` prefix. A route added under `/v1/` next year is a `GET` and is not
+    covered by that carve-out; `GET /v1/me` is under that prefix and is in the
+    document, which is the standing proof. A test asserts exactly that, and the
+    header and the test name the same normalised keys, so the two cannot drift.
+  - **Both directions were proved red.** A planted `GET /v1/api-keys` fails
+    `documentedNotServed` with the file and line to fix; deleting `GET /v1/me`
+    fails `unexplained`. Both were reverted.
+  - **Seven departures from `core/docs/openapi-conventions.md` are recorded in the
+    document's header as open decisions**, not resolved locally: `exposes` is
+    still absent from `cafaye.yml` even though the document now exists; the
+    browser surface and the probes are not under `/v1`; an API key is not a bearer
+    JWT; the browser surface has a same-origin gate and no CSRF token; `404` and
+    `500` are still the v0 `{error, message}` shape and guard therefore produces
+    no `not_found` or `internal` problem code; `/readyz`'s `503` is
+    `application/json` (the conflict `identity` also records, so the ruling wants
+    to be fleet-wide); and `Idempotency-Key` is not honoured on
+    `POST /auth/register`. The two already open in `cafaye.yml` — RS256 only, the
+    `scope` claim, the default issuer, and the three extra error codes — are
+    referenced rather than restated.
+- **`RATE_LIMIT_HEADERS` is exported from `middleware/rateLimit.ts`**, and
+  `rateLimit.test.ts` asserts the list and what `announce` actually sets are the
+  same set. The document has to name all eight fields, and a list written out in a
+  YAML file is a list that can only fail for a name somebody remembered. A header
+  added to the middleware and not to the document now fails the gate instead of
+  reaching a client undocumented.
+- **`PROBE_PATHS` is exported from `index.ts`.** The document declares a `429` on
+  every operation *except* the two the limiter spares, and that exemption is a
+  claim about this set rather than about two paths somebody typed into a test.
+- **The Dockerfile's test stage copies `openapi/`.** Without it the tripwire would
+  not run in the image that ships, and the suite would be green having checked the
+  document in no tree at all.
+
 - **CI, calling kit's reusable workflow.**
   `.github/workflows/ci.yml` calls
   `cafaye/kit/.github/workflows/ci.reusable.yml@master` with `language: bun`, and
