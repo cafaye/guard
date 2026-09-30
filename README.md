@@ -622,14 +622,17 @@ the source with the packet that replaces them.
   decides where a path goes does not exist yet, and `/v1/me` is a placeholder
   for the surface that will replace it.
 - **The live Redis tier does not run inside the image.** `docker build --target
-  test` has no `redis-server` and no way to reach one: buildkit refuses
-  `--network=host`, a sidecar is not addressable from a `RUN`, and installing one
-  into the stage is 30 MB and 15 seconds to obtain a check the `redis` job already
-  forces. The tier is instead forced where a server can exist — the `redis` CI job,
-  against a pinned `redis:7.4.1-alpine`. The gap is bounded rather than hidden: the
-  `image` job compares **test files**, not test counts, precisely so the 14 skips
-  this causes are expected and a genuinely missing test file is not. If a future
-  packet wants the image to execute the script, the honest form is a
+  test` has no `redis-server` and no way to reach one. Measured on Docker 29.4.0,
+  because the reason is not the obvious one: `--network=host` is *accepted*, and a
+  `RUN` under it still cannot reach a server on the host's network — the connect is
+  refused, so the flag buys nothing and reads like it worked. A sidecar is worse,
+  since `docker build` has no way to declare a dependency container. Installing a
+  server into the stage is 30 MB and ~15 seconds to obtain a check the `redis` job
+  already forces. The tier is instead forced where a server can exist — the `redis`
+  CI job, against a pinned `redis:7.4.1-alpine`. The gap is bounded rather than
+  hidden: the `image` job compares **test files**, not test counts, precisely so the
+  14 skips this causes are expected and a genuinely missing test file is not. If a
+  future packet wants the image to execute the script, the honest form is a
   `redis-server` in the test stage, and it changes what the image produces.
 - **The Redis script is executed in CI, not in a deployment.** `REDIS_URL`
   selects a real shared store, and the GCRA Lua now runs against a real

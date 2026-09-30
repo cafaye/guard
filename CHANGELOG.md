@@ -10,6 +10,16 @@ dependency versions follow npm's own rules.
 
 ### Fixed
 
+- **The README's stated reason the live Redis tier cannot run in the image was
+  wrong, and a reader would have been misled by it.** It claimed "buildkit refuses
+  `--network=host`". On Docker 29.4.0 the flag is **accepted** — and a `RUN` under
+  it still cannot reach a server on the host's network, so the conclusion held
+  while the mechanism did not. That is the worse combination: someone trying to
+  close the gap would find the flag accepted, see a build that looked fine, and
+  conclude the tier was easy to enable. Now states what was measured — the flag is
+  accepted and buys nothing, and the real obstacles are the absent sidecar
+  mechanism and the 30 MB of stage to install a server the `redis` job already
+  runs.
 - **`docker build --target test` now runs the same tests a host run does.** It ran
   **392 tests across 15 files** where a host run ran **399 across 16**. The seven
   missing were `pins.test.ts`, which sits at the repository root and which the test
