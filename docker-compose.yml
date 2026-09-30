@@ -1,0 +1,37 @@
+---
+# The local development stack for guard: the gateway and nothing else.
+#
+#   docker compose up -d --build
+#   curl localhost:8080/healthz
+#   curl localhost:8080/readyz
+#
+# guard talks to no database in v0, so this file declares one service. The
+# service also runs straight from the worktree with `bun run src/index.ts`,
+# which is the faster loop; compose exists to exercise the image that ships.
+
+services:
+  guard:
+    build:
+      context: .
+      args:
+        BUN_VERSION: "1.3.12"
+    image: cafaye/guard:dev
+    environment:
+      PORT: "8080"
+      NODE_ENV: production
+    ports:
+      - "8080:8080"
+    healthcheck:
+      # Liveness, not readiness: the point is "is this process answering", which
+      # is the one question a restart can usefully act on. A dependency outage
+      # is /readyz's to report and must not restart the gateway.
+      test:
+        - CMD
+        - bun
+        - -e
+        - "fetch('http://127.0.0.1:8080/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped

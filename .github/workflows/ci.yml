@@ -1,0 +1,62 @@
+---
+# The CI path for guard.
+#
+# NOT kit's reusable workflow, deliberately. kit's ci.reusable.yml has jobs for
+# go, ruby, elixir, python, node and rust, and its `node` job runs `npm ci`
+# against a package-lock.json — guard has neither a package-lock nor npm in the
+# loop, so calling it would fail on day one. The gap is kit's to close (a `bun`
+# job); when it exists, this file collapses to a `uses:` call. Until then this
+# job is the whole gate: frozen install, typecheck, tests.
+#
+# No secrets, no cafaye service is contacted, nothing is published. Release work
+# is a separate workflow so a red test can never publish.
+name: ci
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bun:
+    name: bun
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.12"
+      - name: install
+        # Frozen: installs exactly bun.lock and fails when the lock and the
+        # manifest disagree. Plain `bun install` here would let a lockfile drift
+        # reach main unnoticed, which is the whole thing the lockfile is for.
+        run: bun install --frozen-lockfile
+      - name: typecheck
+        run: bun run typecheck
+      - name: test
+        run: bun test
+      - name: manifest is valid
+        # cafaye.yml is `additionalProperties: false` against core's schema. The
+        # schema is fetched from the platform repo rather than vendored, so this
+        # checks the manifest against what core publishes today.
+        run: |
+          curl -fsSL -o cafaye.manifest.schema.json \
+            https://raw.githubusercontent.com/cafaye/core/master/schemas/cafaye.manifest.schema.json
+          python3 -m pip install --quiet --disable-pip-version-check jsonschema
+          python3 - <<'PY'
+          import json, sys
+          import jsonschema, yaml
+
+          schema = json.load(open("cafaye.manifest.schema.json"))
+          manifest = yaml.safe_load(open("cafaye.yml"))
+          jsonschema.validate(manifest, schema)
+          print("cafaye.yml validates against core's manifest schema")
+          PY
+      - name: image builds
+        # The Dockerfile's test stage runs the suite, so this is a second
+        # independent proof that the image is buildable, not a third test run.
+        run: docker compose build

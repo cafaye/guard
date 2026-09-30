@@ -1,0 +1,44 @@
+---
+# cafaye.yml — the cafaye project manifest for guard.
+#
+# Conforms to core's frozen schema
+# (cafaye/core: schemas/cafaye.manifest.schema.json). Specs are manager-owned:
+# a worker records the shape it is being built against and marks what it cannot
+# decide. See AGENTS.md.
+#
+# > DECISION NEEDED (guard): `exposes` is absent, and conventions rule 3 says a
+# > service that serves traffic must declare it. guard does serve traffic, so
+# > the omission is a known gap, not a judgement that the rule does not apply.
+# > Filling it in needs an OpenAPI 3.1 document for guard's HTTP surface, and
+# > specs are manager-owned — a worker drafting one would be publishing a
+# > contract the manager has not agreed to. Requested: the two probe endpoints
+# > for v0 (/healthz, /readyz), with the routed surface added as the JWKS and
+# > proxy packets land. Until that exists, `caf dev` and `pantry` have nothing
+# > to read for guard, which is the cost of leaving it out.
+name: guard
+description: The cafaye public gateway — the only door in, terminating auth and rate limits in front of every service.
+language: typescript
+core: ^0.1.0
+
+# guard subscribes to no events. It answers requests; it does not react to a
+# bus. Delivery being at-least-once is someone else's idempotency problem.
+consumes: []
+
+# guard builds on identity's signing keys: the JWKS it verifies bearer tokens
+# against belongs to identity. Nothing else is a service-level dependency —
+# hono, bun and the rest are packages and live in package.json (rule 4).
+dependencies:
+  - name: identity
+    # Provisional: no cafaye service has tagged a release yet, so this is the
+    # platform's initial core range rather than a version identity has shipped.
+    version: ^0.1.0
+    required: true
+
+repository:
+  url: git@github.com:cafaye/guard.git
+  defaultBranch: master
+  visibility: public
+
+owner:
+  team: guard
+  contact: guard@cafaye.com
