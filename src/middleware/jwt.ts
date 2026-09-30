@@ -56,6 +56,16 @@ export type Principal = {
   sub: string;
   /** The `scope` claim, split on whitespace. Empty when the claim is absent. */
   scope: string[];
+  /**
+   * The account the request acts on, from the `account_id` claim, when identity
+   * issued one. Absent for a token that has no such claim, which is not an
+   * error: a user with no workspace *is* the account, and
+   * `accountIdOf` in `./limitKey` falls back to `sub`.
+   *
+   * It is a field rather than a claim lookup at each use so that the one place
+   * that decides what an account is, is the one place that read the token.
+   */
+  accountId?: string;
   claims: JWTPayload;
 };
 
@@ -284,6 +294,10 @@ function principalOf(payload: JWTPayload): Outcome {
       // An absent claim is an empty set, never everything: a scope gate that
       // treated "no scopes" as "all scopes" would be a gate with no gate.
       scope: typeof raw === "string" ? raw.split(/\s+/).filter(Boolean) : [],
+      // A non-string `account_id` is ignored rather than rejected: the token is
+      // still a valid token, and a rate-limit key is a worse thing to lose than
+      // a well-formed claim is to gain.
+      accountId: typeof payload.account_id === "string" && payload.account_id !== "" ? payload.account_id : undefined,
       claims: payload,
     },
   };

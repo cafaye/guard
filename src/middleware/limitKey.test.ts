@@ -9,7 +9,14 @@ import { clientIp, hasApiKeyScheme, rateLimitKey, type KeySource } from "./limit
  * module and the reason its tests build the context rather than a fake it.
  */
 function app(): Hono {
-  return new Hono();
+  const a = new Hono();
+  // Hono's default error handler turns a thrown RangeError into a 500, which
+  // would hide the one thing this file wants to see: that a bad trusted-proxy
+  // count is refused rather than tolerated.
+  a.onError((error) => {
+    throw error;
+  });
+  return a;
 }
 
 describe("the key priority table", () => {
@@ -130,10 +137,19 @@ describe("clientIp and the trusted proxy count", () => {
     expect(await read(1, { "x-forwarded-for": "203.0.113.4, , 10.0.0.1" })).toBe("10.0.0.1");
   });
 
-  test("a long chain is read from the right, whatever the caller prepended", async () => {
+  test("a long chain is read from the right, and nothing a caller prepends is ever read", async () => {
+    // One trusted proxy means one hop: the rightmost entry is what that proxy
+    // saw, so it is the caller's address and every entry to its left is
+    // something the caller wrote. A caller who prepends a fresh address per
+    // request therefore does not get a fresh bucket — the answer does not move
+    // off the right, it just slides left past the junk.
     const chain = ["10.0.0.9", "10.0.0.8", "10.0.0.7", "203.0.113.4", "10.0.0.1"].join(", ");
 
-    expect(await read(1, { "x-forwarded-for": chain })).toBe("203.0.113.4");
+    expect(await read(1, { "x-forwarded-for": chain })).toBe("10.0.0.1");
+    expect(await read(1, { "x-forwarded-for": `198.51.100.7, ${chain}` })).toBe("10.0.0.1");
+    // Two proxies read one further in, which is the same rule at a different hop
+    // count rather than a second rule.
+    expect(await read(2, { "x-forwarded-for": chain })).toBe("203.0.113.4");
   });
 
   test("refuses a negative trusted proxy count", async () => {
