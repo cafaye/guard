@@ -2,16 +2,16 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { createJwtVerifier, DEFAULT_IDENTITY_ISSUER, type AuthEnv, type JwtOptions } from "./middleware/jwt";
 import { rateLimit } from "./middleware/rateLimit";
+import { createBffAuth, DEFAULT_IDENTITY_URL, identityProbe, type BffOptions } from "./bff/auth";
+import type { Probe, ProbeStatus } from "./probe";
 
-/** What a readiness probe reports for one dependency. */
-export type ProbeStatus = "ok" | "unavailable";
-export type Probe = () => ProbeStatus | Promise<ProbeStatus>;
+export type { Probe, ProbeStatus } from "./probe";
 
 export type AppOptions = {
   /**
-   * Readiness probes by dependency name. v0 registers none, so `/readyz` is
-   * unconditionally ready; the first packet that gives guard a dependency
-   * registers it here and nowhere else.
+   * Readiness probes by dependency name. Nothing registers one by hand: the
+   * first packet that gives guard a dependency registers it here and nowhere
+   * else, which `runtimeOptions` does for identity.
    */
   probes?: Record<string, Probe>;
   /** Omit to run with no rate limiting at all. */
@@ -22,6 +22,12 @@ export type AppOptions = {
    * worse than an endpoint that is not there.
    */
   jwt?: JwtOptions;
+  /**
+   * Omit and there is no browser surface at all, for the same reason: with no
+   * identity to ask there is no session to mint, and an endpoint that would have
+   * to invent one is worse than an endpoint that is not there.
+   */
+  bff?: BffOptions;
 };
 
 /**
@@ -81,6 +87,20 @@ export function createApp(options: AppOptions = {}): Hono<AuthEnv> {
     app.get("/v1/me", (c) => c.json(c.get("principal")));
   }
 
+  // The browser surface. Mounted per route, not on the /auth/* prefix: the
+  // same-origin gate is for requests that change something, and on the prefix it
+  // would demand an Origin header from GET /auth/me, which has nothing to
+  // protect. Every /auth route is traffic, so the limiter above already counts
+  // it — including the ones this gate refuses, because a cross-site POST that
+  // costs a request to reject is a cross-site POST worth rejecting.
+  if (options.bff) {
+    const bff = createBffAuth(options.bff);
+    app.post("/auth/register", bff.requireSameOrigin, bff.register);
+    app.post("/auth/login", bff.requireSameOrigin, bff.login);
+    app.post("/auth/logout", bff.requireSameOrigin, bff.logout);
+    app.get("/auth/me", bff.me);
+  }
+
   app.notFound((c) => c.json({ error: "not_found", message: "no such route" }, 404));
 
   app.onError((error, c) => {
@@ -132,7 +152,16 @@ function clientKey(c: Context): string {
 export function runtimeOptions(env: Record<string, string | undefined> = Bun.env): AppOptions {
   const ttl = env.IDENTITY_JWKS_TTL_MS?.trim();
 
+  // Built once and used twice. The app gets the options; the probe is built from
+  // the same object, so /readyz and /auth cannot end up naming two different
+  // identity services after one careless edit.
+  const bff: BffOptions = { identityUrl: env.IDENTITY_URL?.trim() || DEFAULT_IDENTITY_URL };
+
   return {
+    bff,
+    // Every /auth route is unreachable without identity, which is the one thing
+    // a readiness endpoint exists to report. Registered here and nowhere else.
+    probes: { identity: identityProbe(bff) },
     jwt: {
       issuer: env.IDENTITY_ISSUER?.trim() || DEFAULT_IDENTITY_ISSUER,
       audience: env.GUARD_CLIENT_ID?.trim() || DEFAULT_CLIENT_ID,

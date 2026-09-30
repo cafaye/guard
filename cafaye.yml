@@ -51,6 +51,28 @@ consumes: []
 # >
 # > Requested: a ruling on 1 and 2 from the manager, ideally in the same place
 # > core's conventions are amended, so the contract lives in one file.
+#
+# > DECISION NEEDED (guard, guard-03): the browser surface adds two error codes
+# > core does not reserve, and gives one service a second variable.
+# >
+# >  4. `invalid_json` (400), `payload_too_large` (413) and `account_locked`
+# >     (423). core's reserved list is unauthorized, forbidden, not_found,
+# >     conflict, validation_failed, rate_limited, idempotency_key_reused,
+# >     internal, unavailable. identity already answers with all three slugs
+# >     (identity/internal/httpapi/problem.go), and guard is the second caller of
+# >     identity's answers, so it reuses them rather than inventing a
+# >     guard-private synonym for the same three failures. The alternative makes
+# >     a client need a translation table to read a platform.
+# >  5. Two variables for one service. `IDENTITY_ISSUER` is where tokens are
+# >     *verified* — an https origin, in every environment. `IDENTITY_URL` is where a
+# >     session is *requested* — a service address, different per environment, and
+# >     `localhost` inside a container is guard itself. One variable cannot be
+# >     both, and core's conventions name neither, so nothing is being
+# >     contradicted — but an amendment should say what a gateway is expected to
+# >     call its identity service.
+# >
+# > Requested: a ruling on 4 and 5 alongside 1 and 2, and an entry in core's
+# > conventions for the three code slugs so the list is not kept twice.
 dependencies:
   - name: identity
     # Provisional: no cafaye service has tagged a release yet, so this is the

@@ -65,4 +65,52 @@ describe("problem", () => {
     // A token in a query string must not come back out in an error body.
     expect(body.instance).toBe("/v1/me");
   });
+
+  test("errors[] appears only when a caller passes it, and only on a 422", async () => {
+    const app = new Hono();
+    app.get("/v1/valid", (c) =>
+      problem(c, {
+        status: 422,
+        code: "validation_failed",
+        detail: "the request has an invalid field",
+        errors: [{ field: "email", code: "invalid_format" }],
+      }),
+    );
+    app.get("/v1/refused", (c) =>
+      problem(c, { status: 401, code: "unauthorized", detail: "a bearer token is required", errors: [{ field: "a", code: "b" }] }),
+    );
+
+    const valid = (await (await app.request("/v1/valid")).json()) as { errors: unknown };
+    expect(valid.errors).toEqual([{ field: "email", code: "invalid_format" }]);
+
+    // core scopes the array to 422. Emitting it anywhere else tells a client
+    // there is a per-field problem with a request that never had fields.
+    const refused = (await (await app.request("/v1/refused")).json()) as Record<string, unknown>;
+    expect(refused.errors).toBeUndefined();
+  });
+
+  test("every code guard can produce has a title of its own", async () => {
+    // A missing entry would render `title: undefined` in a response a client is
+    // meant to display, and the type would not have caught it.
+    const cases = [
+      { code: "unauthorized", status: 401, title: "Unauthorized" },
+      { code: "forbidden", status: 403, title: "Forbidden" },
+      { code: "unavailable", status: 503, title: "Service unavailable" },
+      { code: "invalid_json", status: 400, title: "Invalid request" },
+      { code: "conflict", status: 409, title: "Conflict" },
+      { code: "validation_failed", status: 422, title: "Validation failed" },
+      { code: "account_locked", status: 423, title: "Account locked" },
+      { code: "payload_too_large", status: 413, title: "Payload too large" },
+    ] as const;
+
+    const app = new Hono();
+    for (const { code, status } of cases) {
+      app.get(`/${code}`, (c) => problem(c, { status, code, detail: "…" }));
+    }
+
+    for (const { code, title } of cases) {
+      const res = await app.request(`/${code}`);
+      expect(((await res.json()) as { title: string }).title).toBe(title);
+    }
+  });
 });
