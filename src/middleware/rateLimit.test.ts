@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { rateLimit } from "./rateLimit";
 import { memoryRateLimitStore, type RateLimitStore } from "./rateLimitStore";
+import { GCRA_LUA, redisRateLimitStore, type RedisCommands } from "./rateLimitRedis";
 import type { AuthEnv, Principal } from "./jwt";
 
 const WINDOW_MS = 60_000;
@@ -44,6 +46,39 @@ const principal = (accountId: string): Principal => ({
   claims: { sub: accountId, account_id: accountId },
 });
 
+/**
+ * The GCRA script, run in this process, over a bucket map the caller owns.
+ *
+ * Deliberately not a socket: this is the same transcription
+ * `rateLimitRedis.test.ts` uses, and the point of the burst above is that the
+ * *store* is atomic, not that a particular transport was reached.
+ */
+function sharedRedis(state: { keys: Map<string, number> }): RedisCommands {
+  return {
+    async eval(script, keysIn, args) {
+      if (script !== GCRA_LUA) throw new Error("unexpected script");
+
+      const key = keysIn[0] ?? "";
+      const limit = Number(args[0]);
+      const windowMs = Number(args[1]);
+      const now = Number(args[2]);
+      const interval = windowMs / limit;
+      const tat = state.keys.get(key) ?? 0;
+      const next = Math.max(now, tat) + interval;
+      const delay = next - now;
+
+      if (delay > windowMs) return [0, tat, next - windowMs, 0];
+
+      state.keys.set(key, next);
+
+      return [1, next, next - interval - windowMs, Math.max(0, limit - Math.ceil((next - now) / interval))];
+    },
+    async ping() {
+      return true;
+    },
+  };
+}
+
 describe("the limiter answers", () => {
   test("allows up to the limit and then refuses with 429", async () => {
     const a = app({ limit: 2 });
@@ -82,6 +117,90 @@ describe("the limiter answers", () => {
     }
   });
 });
+
+describe("atomicity under a burst", () => {
+  /**
+   * Every request is *sent* before any is awaited, which is what makes this a
+   * burst rather than a sequence: nothing but the store decides the order.
+   */
+  const burstOf = async (send: () => Response | Promise<Response>, count: number): Promise<number[]> =>
+    Promise.all(Array.from({ length: count }, () => Promise.resolve(send()).then((res) => res.status)));
+
+  test("N concurrent requests admit exactly `limit` and refuse the rest", async () => {
+    // THE atomicity test, and it is the one that matters: a read-then-write
+    // limiter has every request read "0 used, limit 50" and then write "1 used",
+    // and admits all 200 — 4x the allowance, which is the bug this whole packet
+    // exists to close.
+    const a = app({ limit: 50 });
+    const burst = 200;
+
+    const statuses = await burstOf(() => a.request("/"), burst);
+    const admitted = statuses.filter((status) => status === 200);
+    const refused = statuses.filter((status) => status === 429);
+
+    expect(admitted).toHaveLength(50);
+    expect(refused).toHaveLength(burst - 50);
+    expect(admitted.length + refused.length).toBe(burst);
+  });
+
+  test("the same holds through a store that is not in this process", async () => {
+    // The in-memory store gets its atomicity from a JavaScript turn being
+    // uninterruptible; Redis gets it from one script. The burst is fired at both
+    // so the claim is about the trait, not about one implementation of it.
+    const commands = sharedRedis({ keys: new Map<string, number>() });
+    const a = app({ limit: 50, store: redisRateLimitStore({ commands }) });
+
+    const statuses = await burstOf(() => a.request("/"), 200);
+
+    expect(statuses.filter((status) => status === 200)).toHaveLength(50);
+    expect(statuses.filter((status) => status === 429)).toHaveLength(150);
+  });
+
+  test("two limiters over one store share the allowance, the way two replicas do", async () => {
+    // Two app instances, one counter store. This is the shape of a two-replica
+    // deployment and it is why a shared store exists at all: with the in-memory
+    // store these two are two allowances and each admits the full limit.
+    const store = memoryRateLimitStore();
+    const a = app({ limit: 10, store });
+    const b = app({ limit: 10, store });
+
+    const statuses = [
+      ...(await burstOf(() => a.request("/"), 10)),
+      ...(await burstOf(() => b.request("/"), 10)),
+    ];
+
+    expect(statuses.filter((status) => status === 200)).toHaveLength(10);
+  });
+
+  test("no identity a caller can present can produce a key the Redis store refuses", async () => {
+    // The store's charset check is a backstop, and tripping it is not a loud
+    // failure: the store throws, the middleware fails open, and the limiter is
+    // off in the deployment that has one. So the key has to be safe before it
+    // gets there, for identities guard does not choose.
+    const commands = sharedRedis({ keys: new Map() });
+    const store = redisRateLimitStore({ commands });
+    const hostile = [
+      "account:with spaces",
+      'account:"quoted"',
+      "account:*",
+      "account:glob?",
+      "account:with\nnewline",
+      "ip:fe80::1%25en0",
+      "ip:unknown",
+      "account:../../etc/passwd",
+    ];
+
+    for (const identity of hostile) {
+      const bucket = `${"guard-api"}:${digestOf(identity)}`;
+      expect(() => store.keyFor(bucket)).not.toThrow();
+    }
+  });
+});
+
+/** The digest the middleware puts in a bucket key, recomputed for the test. */
+function digestOf(identity: string): string {
+  return createHash("sha256").update(identity, "utf8").digest("hex").slice(0, 32);
+}
 
 describe("RateLimit-* headers", () => {
   test("RFC 9651-era fields: RateLimit-Policy and RateLimit, as structured fields", async () => {

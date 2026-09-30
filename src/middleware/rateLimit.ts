@@ -19,6 +19,7 @@
 // rejected credential is cheap to reject — the algorithm is read off the header
 // before any key is fetched.
 import type { Context, MiddlewareHandler } from "hono";
+import { createHash } from "node:crypto";
 import { problem, type Problem } from "../problem";
 import { assertNonNegativeInteger, assertPositiveInteger, assertStructuredKey } from "./assert";
 import { keySourceOf, rateLimitKey } from "./limitKey";
@@ -96,12 +97,7 @@ export function rateLimit(options: RateLimitOptions): MiddlewareHandler<AuthEnv>
 
     let verdict: Awaited<ReturnType<RateLimitStore["hit"]>>;
     try {
-      // The policy name leads the bucket key, so two policies never share a
-      // bucket by accident and a caller who exhausts /auth/login cannot spend the
-      // /v1 allowance. It is the *name*, not the object: the name is the part
-      // that is in the Redis key charset, and a caller must never be able to put
-      // anything else in one.
-      verdict = await store.hit(`${active.policy}|${key}`, {
+      verdict = await store.hit(bucket(active.policy, key), {
         limit: active.limit,
         windowMs: active.windowMs,
         now: at,
@@ -122,6 +118,33 @@ export function rateLimit(options: RateLimitOptions): MiddlewareHandler<AuthEnv>
 
     await next();
   };
+}
+
+/**
+ * The counter key: the policy, then a digest of the caller's identity.
+ *
+ * The policy leads it, so two policies never share a bucket by accident and a
+ * caller who exhausts /auth/login cannot spend the /v1 allowance.
+ *
+ * The identity is digested rather than pasted in, and that is not
+ * tidiness. `rateLimitKey` produces whatever the verified identity contains: an
+ * `account_id` claim is whatever identity chose to put there, an IPv6 address can
+ * carry a `%zone`, and a bucket name becomes a Redis key. The store's charset
+ * check exists to stop anything unsafe landing in one — and a key that trips it
+ * throws, the middleware fails open, and the limiter is silently off in exactly
+ * the deployment that needs it. Hashing makes that impossible by construction
+ * rather than by a charset nobody remembers, and it has the side benefit the
+ * rate-limit draft's privacy section asks for: a `KEYS guard:rl:*` scan no longer
+ * yields a list of the accounts hitting the edge.
+ *
+ * 32 hex characters of SHA-256 is 128 bits against a keyspace of accounts, and
+ * the key is an input to a bucket, not a secret: a collision would merge two
+ * callers' allowances, not expose either.
+ */
+function bucket(policy: string, identity: string): string {
+  const digest = createHash("sha256").update(identity, "utf8").digest("hex").slice(0, 32);
+
+  return `${policy}:${digest}`;
 }
 
 /**
