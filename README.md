@@ -94,8 +94,13 @@ nothing else. identity's token never reaches the page. See
   (default `300000`). A token naming a `kid` that is not in the cached set
   triggers **one** forced refresh per cache window and is then refused — enough
   to pick up a rotation, not enough to let a caller aim every request at
-  identity. The TTL is also the revocation window: a key identity withdraws keeps
-  verifying until the cache expires.
+  identity. The budget is claimed **before** the fetch rather than when it
+  completes, so a burst of simultaneous forged tokens naming an unknown `kid`
+  buys one fetch and not one each; it is a per-window number rather than a flag,
+  and a refresh that *fails* spends it too, so an unreachable identity is not an
+  unlimited fetch allowance for anyone naming a `kid`. The TTL is also the
+  revocation window: a key identity withdraws keeps verifying until the cache
+  expires.
 - **Claims checked:** `iss` (the issuer), `aud` (guard's client id), `exp`,
   `nbf`, and a non-empty `sub`. `scope` is read when present as a
   space-separated string and split into a set; absent means no scopes, never all
@@ -275,12 +280,21 @@ The key is derived in one order, and nothing a caller chose is ever in it.
   your rate. A browser session is not an API caller: `/auth/*` authenticates with
   a cookie and sets no principal, so its traffic is keyed by address and a script
   holding a key can never spend a person's browser budget.
-- **`X-Forwarded-For` is read from the right.** `TRUSTED_PROXIES=n` means *n*
-  proxies append to the chain, and the address is read at that hop counting from
-  the end; everything to the left of it is something the caller wrote. With
-  `TRUSTED_PROXIES=0` the header is not read at all. A chain shorter than the
-  trusted run falls back to the socket peer, because a bucket that groups too many
-  callers is the direction to be wrong in.
+- **`X-Forwarded-For` is read from the right, and an entry that is not an address
+  is refused.** `TRUSTED_PROXIES=n` means *n* proxies append to the chain, and the
+  address is read at that hop counting from the end; everything to the left of it
+  is something the caller wrote. With `TRUSTED_PROXIES=0` the header is not read
+  at all. A chain shorter than the trusted run falls back to the socket peer,
+  because a bucket that groups too many callers is the direction to be wrong in.
+  Each entry is then **parsed** with `isIP` (IPv4 or IPv6, `node:net`, no
+  dependency) rather than pattern-matched for characters that are safe in a Redis
+  key. That distinction is the whole defence: `[0-9a-f:.%]+` also accepts
+  `deadbeef`, `cafe` and `999.1.1.1`, and each of those became a bucket of its
+  own, so a caller who could place an entry at the trusted hop minted an
+  allowance per request with a string that was never an address. The same is true
+  of refusing everything — that merges every client behind one proxy into one
+  bucket — so both directions are pinned by tests in `limitKey.test.ts` and
+  `rateLimit.test.ts`.
 - **The counter key is a digest.** `rateLimitKey` produces whatever the verified
   identity contains — an `account_id` claim is whatever identity chose, an IPv6
   address can carry a `%zone` — and a bucket name becomes a Redis key. The

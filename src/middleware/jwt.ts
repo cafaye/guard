@@ -114,24 +114,54 @@ export function createJwtVerifier(options: JwtOptions): JwtVerifier {
   assertPositiveInteger(timeoutMs, "jwksTimeoutMs");
 
   /**
-   * The cached key set, and whether the fetch that produced it was the forced
-   * one. One verifier per process means one cache: two verifiers would fetch
-   * the key set twice and could disagree about whether a rotation has happened.
+   * The cached key set and when it was fetched. One verifier per process means
+   * one cache: two verifiers would fetch the key set twice and could disagree
+   * about whether a rotation has happened.
    */
-  let cache: { keys: JWK[]; fetchedAt: number; forced: boolean } | null = null;
+  let cache: { keys: JWK[]; fetchedAt: number } | null = null;
+
+  /**
+   * Which cache window the forced refresh has already been spent in.
+   *
+   * Two decisions here, and both were got wrong at least once:
+   *
+   *   * **Spent on decision, not on completion.** The refresh used to set a flag
+   *     after `await fetchKeys()` returned. Every request already in flight when
+   *     a refresh began therefore read the flag as unset and started a refresh
+   *     of its own. A burst of forged tokens naming a key identity does not
+   *     publish — free to send, anonymous, pre-auth — bought one JWKS fetch per
+   *     request instead of one per window: twenty-five requests, twenty-five
+   *     fetches aimed at identity. A budget recorded when the work *lands* is a
+   *     budget the arrival order of a real edge walks straight through.
+   *   * **A window number, not a boolean.** The budget is per window, so a
+   *     window that ends has to refill it. A flag cannot tell this window from
+   *     the last one, which is either why the flag was never cleared or why
+   *     clearing it let a burst in all over again.
+   *
+   * Spent means spent: a refresh that fails still consumes the window's budget.
+   * Otherwise an unreachable identity is an unlimited fetch allowance for
+   * anyone naming a `kid`, which is the amplifier with an outage on top.
+   */
+  let window = 0;
+  let refreshSpentIn: number | null = null;
 
   const isFresh = (): boolean => cache !== null && now() - cache.fetchedAt < ttlMs;
 
   /**
    * Fetches the key set and caches it.
    *
-   * `forced` marks the rotation fetch so the same window can rate-limit the next
-   * one. Stored only on success: a failed fetch must leave the last good set in
-   * place rather than replacing it with an outage.
+   * Stored only on success: a failed fetch must leave the last good set in
+   * place rather than replacing it with an outage. `opening` marks a fetch that
+   * starts a window — a TTL-driven one — and only that kind refills the forced
+   * refresh budget.
    */
-  async function load(forced: boolean): Promise<JWK[]> {
+  async function load(opening: boolean): Promise<JWK[]> {
     const fetched = await fetchKeys();
-    cache = { keys: fetched, fetchedAt: now(), forced };
+    cache = { keys: fetched, fetchedAt: now() };
+    if (opening) {
+      window += 1;
+      refreshSpentIn = null;
+    }
     return fetched;
   }
 
@@ -156,7 +186,7 @@ export function createJwtVerifier(options: JwtOptions): JwtVerifier {
       if (isFresh() && cache) {
         set = cache.keys;
       } else {
-        set = await load(false);
+        set = await load(true);
         fetched = true;
       }
     } catch (error) {
@@ -171,10 +201,16 @@ export function createJwtVerifier(options: JwtOptions): JwtVerifier {
     // answered by one forced refresh per cache window — never a second fetch
     // for a set this request has just read, and never a second one in the same
     // window, so a caller cannot aim every request at identity.
+    //
+    // The budget is claimed before the await and not after it, and that is the
+    // whole fix: a caller who can make twenty-five of these arrive at once gets
+    // one fetch, and the other twenty-four are refused off the cached set
+    // without a network call at all.
     if (!publishes(set, header.kid)) {
-      if (!fetched && cache?.forced !== true) {
+      if (!fetched && refreshSpentIn !== window) {
+        refreshSpentIn = window;
         try {
-          set = await load(true);
+          set = await load(false);
         } catch (error) {
           console.error("guard: could not refresh the JWKS", error);
           return { refusal: unavailable() };

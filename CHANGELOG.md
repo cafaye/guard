@@ -10,6 +10,61 @@ dependency versions follow npm's own rules.
 
 ### Fixed
 
+- **A burst of forged tokens naming an unknown `kid` bought one JWKS fetch each,
+  aimed at identity.** The refresh budget was a flag on the cached key set, set
+  when the fetch *completed*. Every request already in flight when a refresh
+  began therefore read the flag as unset and started a refresh of its own, so
+  twenty-five simultaneous requests produced twenty-five fetches where the rule
+  says one. Pre-auth, anonymous, and free to send: it needed no valid token,
+  only a token-shaped string naming a key identity does not publish. The budget
+  is now a cache-window number claimed **before** the await, so the burst gets
+  one fetch and the rest are refused off the cached set with no network call. A
+  refresh that *fails* spends the budget too — otherwise an unreachable identity
+  is an unlimited fetch allowance for anyone naming a `kid`.
+- **`X-Forwarded-For` accepted strings that are not addresses as bucket
+  identities.** The filter was `[0-9a-f:.%]+`, which answers "is every character
+  safe to write into a Redis key" rather than "is this an address". `deadbeef`,
+  `cafe`, `...` and `999.1.1.1` all passed and each became a bucket of its own,
+  so a caller able to put an entry in the trusted position minted a fresh
+  allowance per request by varying a string that was never an address — the
+  limiter was decorative in exactly the deployment that configures it. `clientIp`
+  now parses with `isIP` from `node:net` (a runtime builtin, no new dependency),
+  which also settles the `%zone` suffix the old charset had to tolerate. Real
+  addresses in every shape a proxy emits are still read, and `::1` is still an
+  address: a filter that refuses everything is the same defect pointing the other
+  way.
+- **An identity 5xx was dropped with no log line at all.** `call()` logs when
+  the *transport* fails; an identity that is up and returning 500 — a broken
+  deploy, an OOM, a panic — reached `unusable()` silently. Every login in a
+  deployment failed with one status and nothing was recorded for an operator to
+  correlate, which is a silent outage whose only signal is the browsers of its
+  users. `unusable()` now records the target URL and the status. **Never the
+  body**: a dependency's error page is exactly where a credential turns up, so
+  the line records the shape of the answer and not its contents.
+
+### Added
+
+- **`src/edge.test.ts` — the public edge under attack.** Fifteen negative claims
+  with the mechanism that makes each one true: no client-controlled outbound
+  fetch (a body carrying `169.254.169.254` reaches identity as data, never as a
+  target; no request header moves the target; a redirect from identity is not
+  followed), path handling (thirteen spellings of `/v1/me` all meet the auth
+  gate; a traversal out of `/v1` mints no session), header and log safety (CRLF
+  in a path, CRLF in `X-Forwarded-For`, a policy name carrying a second
+  structured-field item, an upstream error body), and the probe exemptions being
+  exact paths rather than prefixes. No network: identity is an injected `fetch`
+  and every key is generated in-process.
+- **`test/noSkips.test.ts` — the suite cannot skip itself.** `bun test` exits 0
+  on a run where every test was skipped, which is how an environment-gated tier
+  gets added and then quietly never runs again. The Redis tier already carries
+  two mechanisms against that (`GUARD_REDIS_REQUIRED=true` and the `redis` job's
+  `0 pass` check) and both protect **one file**. This reads the suite's own source
+  and fails on any `skip`, `skipIf`, `todo` or `only` outside a one-entry
+  allowlist, naming the file in the failure, and separately asserts that the
+  Redis tier still carries the `GUARD_REDIS_REQUIRED` guard. Its detector is
+  assembled from arrays at runtime rather than written as a regex literal,
+  because a literal matching `\.\s*(skip|skipIf)` matches its own source.
+
 - **The README's stated reason the live Redis tier cannot run in the image was
   wrong, and a reader would have been misled by it.** It claimed "buildkit refuses
   `--network=host`". On Docker 29.4.0 the flag is **accepted** — and a `RUN` under

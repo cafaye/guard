@@ -448,6 +448,46 @@ describe("key rotation", () => {
     expect(identity.requests).toHaveLength(2);
   });
 
+  test("a burst of unknown kids buys one refresh, not one per request", async () => {
+    // The sequential case above is not the shape an attacker sends. A forged
+    // token is free to make twenty-five requests that all arrive *before* the
+    // first forced refresh has answered, and the budget the source names — "one
+    // forced refresh per cache window" — has to hold for the arrival order a
+    // real edge produces, not only for a loop of `await`s.
+    //
+    // This is pre-auth and unauthenticated: the caller needs no valid token to
+    // reach it, only a token-shaped string naming a key identity does not
+    // publish. Every one of those requests aims a fetch at identity, so the
+    // limiter's whole answer to it has to be a number.
+    const gateway = app();
+    expect((await gateway.request("/private/thing", bearer(await validToken()))).status).toBe(200);
+    expect(identity.requests).toHaveLength(1);
+
+    const forged = await signToken(rotated, {
+      iss: identity.issuer,
+      aud: AUDIENCE,
+      sub: "u",
+      exp: seconds(60),
+    });
+
+    const burst = await Promise.all(
+      Array.from({ length: 25 }, () => gateway.request("/private/thing", bearer(forged))),
+    );
+
+    for (const res of burst) {
+      await expectProblem(res, {
+        status: 401,
+        code: "unauthorized",
+        detail: "token was signed by an unknown key",
+        instance: "/private/thing",
+      });
+    }
+
+    // One cached fetch plus exactly one forced refresh, however many arrived at
+    // once. Anything above two is the amplifier this rule exists to prevent.
+    expect(identity.requests).toHaveLength(2);
+  });
+
   test("a key identity retracts keeps working until the cache expires", async () => {
     // The TTL is the revocation window, which is why it is configuration and
     // not a constant. Anyone shortening it is trading identity's load for how

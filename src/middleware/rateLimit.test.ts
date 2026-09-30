@@ -410,6 +410,42 @@ describe("key derivation, through the middleware", () => {
     expect((await from("203.0.113.4")).status).toBe(429);
     expect((await from("203.0.113.5")).status).toBe(200);
   });
+
+  test("a caller who varies the forwarding header on non-addresses gains nothing", async () => {
+    // The consequence of the address filter, stated through the limiter rather
+    // than through `clientIp`. The test above proves two *addresses* are two
+    // callers; this proves two *non-addresses* are not a way to mint two
+    // allowances.
+    //
+    // `dead`, `beef`, `cafe` and `babe` are all inside `[0-9a-f:.%]+`, so an
+    // address check that only asks "is every character safe to put in a Redis
+    // key" reads all four as four different clients. Under the limiter that is
+    // a limit of 3 that is never reached: six requests, six buckets, six 200s.
+    // Every one of them is refused by the address check and falls back to the
+    // peer, so they all land in one bucket and the fourth is a 429.
+    const a = app({ limit: 3, trustedProxies: 1 });
+
+    const statuses: number[] = [];
+    for (const forged of ["dead", "beef", "cafe", "babe"]) {
+      statuses.push((await a.request("/", { headers: { "x-forwarded-for": forged } })).status);
+    }
+
+    expect(statuses).toEqual([200, 200, 200, 429]);
+  });
+
+  test("a real address is still a real caller, after the filter is tightened", async () => {
+    // The other half of the same contract, and the one a bad fix breaks: an
+    // address check that refuses everything is a limiter keyed on the peer alone,
+    // which silently merges every client behind one proxy into one bucket.
+    const a = app({ limit: 1, trustedProxies: 1 });
+
+    const from = (ip: string) => a.request("/", { headers: { "x-forwarded-for": ip } });
+
+    expect((await from("203.0.113.4")).status).toBe(200);
+    expect((await from("203.0.113.4")).status).toBe(429);
+    expect((await from("203.0.113.5")).status).toBe(200);
+    expect((await from("2001:db8::1")).status).toBe(200);
+  });
 });
 
 describe("per-route limits", () => {

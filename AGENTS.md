@@ -26,6 +26,7 @@ src/middleware/limitKey.ts  which bucket a request is: account > api key > addre
 src/middleware/limits.ts     the per-route allowance table
 src/middleware/rateLimit.ts  the limiter — key, policy, headers, 429, fail-open
 src/middleware/rateLimitTypes.ts   the RateLimitStore contract
+src/edge.test.ts          the edge under attack: no SSRF, path traversal, header injection
 src/middleware/rateLimitStore.ts   GCRA in memory, per process
 src/middleware/rateLimitRedis.ts   GCRA in Redis, one Lua script, plus RESP2
 src/middleware/apiKey.ts     API keys — issue, authenticate, revoke
@@ -38,6 +39,7 @@ test/limitTable.ts      a one-number limit table, for tests
 test/openapiPaths.ts    reads openapi/v1.yaml and Hono's app.routes, and raises
                         rather than under-reading either
 test/openapiDocument.test.ts  openapi/v1.yaml held to the router, both directions
+test/noSkips.test.ts     reads the suite's own source; fails on any skip outside one allowlist
 pins.test.ts            the bun pin, asserted across every file that states it
 openapi/v1.yaml         the HTTP contract, and the open decisions in its header
 bin/prime               the gate: frozen install, typecheck, bun test
@@ -108,7 +110,31 @@ fake that looks finished.
 only reason guard talks to identity at all, and it is bounded twice: a cached set
 is reused for its TTL, and a `kid` that is not in it buys **one** forced refresh
 per cache window. A rule a caller can trigger per request is an amplifier aimed
-at a dependency, not a fallback.
+at a dependency, not a fallback. Claim that budget **before** the fetch, not
+after: a budget recorded when the work lands is a budget a burst walks straight
+through, and a burst is the shape an edge actually receives. The budget is a
+window number rather than a flag, because a flag cannot tell one TTL window from
+the next, and a refresh that *fails* spends it too — otherwise an unreachable
+identity is an unlimited fetch allowance for anyone naming a `kid`.
+
+**An address filter is a parser, not a charset.** `X-Forwarded-For` entries end
+up in a bucket name, so they are checked — and "contains no character unsafe for
+a Redis key" is not the question. `[0-9a-f:.%]+` accepted `deadbeef`, `cafe` and
+`999.1.1.1`, each of which became a bucket of its own, so a caller who could put
+an entry in the trusted position minted an allowance per request with a string
+that was never an address. `clientIp` uses `isIP` from `node:net` — a runtime
+builtin, not a dependency — and a new filter there has to answer "is this an
+address". Rejecting everything is the same defect pointing the other way: it
+silently merges every client behind one proxy into one bucket.
+
+**A dependency answering 5xx is not an outage guard can be quiet about.**
+`call()` logs when the *transport* fails, which is the rare half. An identity
+that is up and returning 500 — a broken deploy, an OOM, a panic — reached
+`unusable()` with no log line at all, so every login in a deployment failed with
+one status and nothing was recorded for an operator to correlate. `unusable()`
+takes the target URL and the status and writes them down. **Never the body**: a
+dependency's error page is exactly where a credential turns up, so the line
+records the *shape* of the answer and never its contents.
 
 **The bucket is the strongest identity the request has, and no weaker.** The key
 is derived in one order — verified account id, then API key id, then client
@@ -207,7 +233,16 @@ mechanisms stop that from reading as a pass, and a new gated tier needs both:
   unset, rather than skip.
 - The `redis` job parses the summary and fails on `0 pass` or on any skip.
 
-Set the environment and prove the count. A tier added without both is a tier
+Those two protect **one file**. A second gated tier added tomorrow, or a
+`test.skip` left behind after a flaky run, arrives with neither, so
+`test/noSkips.test.ts` is the third: it reads the suite's own source and fails on
+any `skip`, `skipIf`, `todo` or `only` outside a one-entry allowlist, and it names
+the file in the failure. Adding a skip means editing that allowlist, which is a
+reviewable act. Its detector is assembled from arrays at runtime rather than
+written as a regex literal, because a literal `.\s*(skip|skipIf)` matches its own
+source and the tripwire would then always fail for the wrong reason.
+
+Set the environment and prove the count. A tier added without all three is a tier
 nobody will notice is not running.
 
 **CI runs `bin/prime`, not a CI-only variant.** kit's `bun` job runs the same

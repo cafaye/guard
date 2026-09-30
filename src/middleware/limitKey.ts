@@ -23,6 +23,7 @@
 // The prefixes are load-bearing in a second way: they are the counter key, so
 // an account id that collides with an address can never share a bucket with it.
 import type { Context } from "hono";
+import { isIP } from "node:net";
 import { assertNonNegativeInteger } from "./assert";
 import type { AuthEnv, Principal } from "./jwt";
 
@@ -147,11 +148,27 @@ function peerAddress(c: Context): string {
 /**
  * An address, or null.
  *
- * Entries are checked rather than passed through: a bucket name ends up in a
- * Redis key, and a header a caller chose must not be able to put a newline, a
- * space or a brace in one. Only something shaped like an IP literal is accepted,
- * with an optional port and IPv6 brackets stripped, and `unknown` is refused so
- * it cannot be confused with the placeholder that means the same thing.
+ * Entries are *parsed*, not pattern-matched for characters that are safe to
+ * write somewhere. Both were tried and only one of them is a defence.
+ *
+ * The charset question is real: a bucket name ends up in a Redis key, and a
+ * header the caller chose must not be able to put a newline, a space or a brace
+ * in one. But `[0-9a-f:.%]+` answers "is every character safe" and not "is this
+ * an address", and the second is the question. `deadbeef`, `cafe`, `...` and
+ * `999.1.1.1` are all inside that character class and none of them is a host,
+ * so each became a bucket identity of its own and a caller who could put an
+ * entry in the trusted position minted a fresh allowance per request by
+ * varying a string that was never an address. The filter was not too narrow; it
+ * was answering a different question.
+ *
+ * `isIP` is the parse — IPv4 or IPv6, nothing else — and it is a pure function
+ * in a runtime builtin rather than a dependency: `node:net` next to the
+ * `node:crypto` SHA-256 in `./rateLimit`, not a package in `package.json`.
+ * It also settles the `%zone` suffix (`fe80::1%eth0`), which is part of an IPv6
+ * literal and was the reason the old charset had to allow `%` at all.
+ *
+ * `unknown` is refused explicitly so it cannot be confused with the placeholder
+ * that means the same thing, even though it would not parse either.
  */
 function addressOf(entry: string | undefined): string | null {
   if (typeof entry !== "string") return null;
@@ -159,7 +176,7 @@ function addressOf(entry: string | undefined): string | null {
   const bare = stripPort(entry.trim().toLowerCase());
   if (bare === "" || bare === UNKNOWN) return null;
 
-  return IP_LITERAL.test(bare) ? bare : null;
+  return isIP(bare) === 0 ? null : bare;
 }
 
 /** `[::1]:443` and `203.0.113.4:443` both reduce to the address. */
@@ -172,7 +189,7 @@ function stripPort(value: string): string {
   return /:\d+$/.test(value) && (value.match(/:/g)?.length ?? 0) === 1 ? value.slice(0, value.lastIndexOf(":")) : value;
 }
 
-const IP_LITERAL = /^[0-9a-f:.%]+$/;
+
 
 /** The API key credential scheme, case-insensitive as HTTP auth schemes are. */
 const API_KEY_SCHEME = /^apikey(?:\s|$)/i;
