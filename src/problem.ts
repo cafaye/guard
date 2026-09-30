@@ -23,7 +23,8 @@ export type ProblemCode =
   | "conflict"
   | "validation_failed"
   | "account_locked"
-  | "payload_too_large";
+  | "payload_too_large"
+  | "rate_limited";
 
 /** `title` is fixed per code: it is a summary, not per-occurrence detail. */
 const TITLES: Record<ProblemCode, string> = {
@@ -35,6 +36,7 @@ const TITLES: Record<ProblemCode, string> = {
   validation_failed: "Validation failed",
   account_locked: "Account locked",
   payload_too_large: "Payload too large",
+  rate_limited: "Too many requests",
 };
 
 /** One per-field failure. core scopes `errors[]` to 422. */
@@ -43,8 +45,9 @@ export type FieldError = { field: string; code: string };
 export type Problem = {
   /** The status this code answers with. 401 for a caller that failed to
    *  authenticate, 403 for one that may not, 409/422/423 for one whose request
-   *  was understood and refused, 503 for a dependency that will not answer. */
-  status: 400 | 401 | 403 | 409 | 413 | 422 | 423 | 503;
+   *  was understood and refused, 429 for one that sent too many requests, 503
+   *  for a dependency that will not answer. */
+  status: 400 | 401 | 403 | 409 | 413 | 422 | 423 | 429 | 503;
   code: ProblemCode;
   /** What happened, in terms the caller can act on. Never an internal reason:
    *  a host, a port, a query, or a parser's opinion goes to the log instead. */
