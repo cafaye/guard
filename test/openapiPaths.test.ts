@@ -271,7 +271,7 @@ describe("the router reader", () => {
     // can serve; filing it as a mount would hide it inside a carve-out. Both are
     // quieter than saying so, which is why this raises.
     expect(() => surfaceOf([{ method: "PROPFIND", path: "/v1/me" }], "a Hono app")).toThrow(
-      /neither one of get/,
+      /neither one of GET, HEAD, POST/,
     );
   });
 });

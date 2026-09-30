@@ -337,7 +337,7 @@ export function surfaceOf(routes: readonly { path: string; method: string }[], w
     // nothing can serve, and filing it as a mount would hide it inside a carve-out.
     if (!mount && !isMethod(method)) {
       throw new Error(
-        `${who} registers \`${method} ${route.path}\`, which is neither one of ${METHODS.join(", ")} nor ` +
+        `${who} registers \`${method} ${route.path}\`, which is neither one of ${normaliseMethods()} nor ` +
           `the \`${MOUNT_METHOD}\` Hono records a middleware mount with. This reader will not guess which ` +
           `kind of thing that is: a misfiled entry is either a route no client can call or a mount ` +
           `hiding inside a carve-out.`,
@@ -528,8 +528,23 @@ function valueOf(text: string): string {
   return text.replace(/^[^:]*?:/, "").trim();
 }
 
+/** The eight names as HTTP spells them, for a message about a route. */
+function normaliseMethods(): string {
+  return METHODS.map(normaliseMethod).join(", ");
+}
+
+/**
+ * Is this one of the eight method names?
+ *
+ * Case-insensitive, and deliberately so: the document spells its methods the
+ * way YAML requires (`get:`, lower case) and Hono records them the way HTTP
+ * spells them (`GET`). Both spellings are legitimate in their own file, so
+ * normalising here is the difference between one reader that understands two
+ * notations and one that only understands the first — and a reader that only
+ * understood the document's spelling would raise on the router's every time.
+ */
 function isMethod(key: string): boolean {
-  return (METHODS as readonly string[]).includes(key);
+  return (METHODS as readonly string[]).includes(key.toLowerCase());
 }
 
 function pathItemField(key: string): boolean {
