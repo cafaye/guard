@@ -8,7 +8,7 @@ import {
   memoryApiKeyStore,
   type ApiKeyStore,
 } from "./apiKey";
-import { createJwtVerifier } from "./jwt";
+import { createJwtVerifier, type Principal } from "./jwt";
 
 const ACCOUNT = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
@@ -20,7 +20,7 @@ const ACCOUNT = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 function gated(store: ApiKeyStore) {
   const auth = createApiKeyAuth({ keys: store });
   const jwt = createJwtVerifier({ issuer: "https://identity.example", audience: "guard-test" });
-  const a = new Hono();
+  const a = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
   a.use("*", async (c, next) => {
     if (auth.hasKeyScheme(c)) return auth.authenticate(c, next);
     return next();
