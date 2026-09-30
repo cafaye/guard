@@ -555,7 +555,40 @@ with:
 | `prime`      | runs `bin/prime` itself, then `git diff --exit-code -- bun.lock`     | the gate is guard's command, and the lockfile check needs an install to have run |
 | `redis`      | the live Redis tier, against a real `redis:7.4.1-alpine`            | guard's counter store is guard's dependency |
 | `manifest`   | `cafaye.yml` against core's fetched manifest schema                 | it reaches into `cafaye/core` |
-| `image`      | hadolint, `docker build --target test`, `docker compose build`     | kit's lint tier does not cover Dockerfiles |
+| `image`      | hadolint, `docker build --target test`, the test files it ran, `docker compose build` | kit's lint tier does not cover Dockerfiles |
+
+### The image runs the same tests you do
+
+`docker build --target test` is a gate, and a gate that runs a subset is a claim
+rather than a check. It used to: the test stage copied `src`, `test` and
+`openapi`, and `pins.test.ts` sits at the repository root, so the image ran **392
+tests across 15 files** where a host run ran **399 across 16**. The seven missing
+were the test asserting that the Bun pin in `package.json`, `mise.toml`, the
+Dockerfile and compose all say the same number — the check that would have noticed
+the image disagreeing with the repository was the one test the image did not run.
+The build was green.
+
+A test file the image does not have does not fail, it is simply not executed, so
+nothing in the build output says so. Two checks close that, and they close
+different halves of it:
+
+| Where | What it reads | What it catches |
+| ----- | ------------- | --------------- |
+| `test/dockerStage.test.ts`, in the suite | the Dockerfile's `COPY` list | a test file the image never asked for |
+| the `image` job in CI | the built image | a `.dockerignore` rule dropping a directory out of a `COPY src ./src` |
+
+The first runs everywhere the suite runs — `bin/prime`, kit's workflow, the image
+— so a new test file fails the local gate until the list names it. `COPY . .`
+would make it vacuous (a whole-context copy is always a superset) and would put the
+doubles in `test/` one careless edit from the runtime stage, so the list stays
+explicit. The second exists because the first reads the Dockerfile and so is blind
+to `.dockerignore`: buildkit copies the rest of an excluded directory and the
+build stays green. The suite emits every test file it discovered, and CI diffs
+that set against `find`.
+
+It compares **file counts, not test counts**, on purpose. The live Redis tier
+skips in-image by design, so the pass count legitimately differs from a host run
+with Redis; the file count cannot.
 
 **The live tier, and why it is a separate job.** `bin/prime` needs no server: it
 drives the Redis path through a JavaScript transcription of GCRA_LUA.
@@ -588,6 +621,16 @@ the source with the packet that replaces them.
 - **Routing.** No request is proxied to a service. The service registry that
   decides where a path goes does not exist yet, and `/v1/me` is a placeholder
   for the surface that will replace it.
+- **The live Redis tier does not run inside the image.** `docker build --target
+  test` has no `redis-server` and no way to reach one: buildkit refuses
+  `--network=host`, a sidecar is not addressable from a `RUN`, and installing one
+  into the stage is 30 MB and 15 seconds to obtain a check the `redis` job already
+  forces. The tier is instead forced where a server can exist — the `redis` CI job,
+  against a pinned `redis:7.4.1-alpine`. The gap is bounded rather than hidden: the
+  `image` job compares **test files**, not test counts, precisely so the 14 skips
+  this causes are expected and a genuinely missing test file is not. If a future
+  packet wants the image to execute the script, the honest form is a
+  `redis-server` in the test stage, and it changes what the image produces.
 - **The Redis script is executed in CI, not in a deployment.** `REDIS_URL`
   selects a real shared store, and the GCRA Lua now runs against a real
   `redis-server` on every push (`redis` job; see
@@ -596,6 +639,15 @@ the source with the packet that replaces them.
   run the script where `REDIS_URL` is actually configured, so a deployment that
   sets it is checked against the store it will really use. CI proves the script;
   nothing yet proves a given deployment points at a working Redis.
+- **Thirteen test files ship in the runtime image.** The Dockerfile copies `src`
+  into the runtime stage, and thirteen `src/**/*.test.ts` come with it. They are
+  inert — nothing imports them, and `bun:test` is a runtime builtin rather than a
+  dependency the production tree installs — so this is about what the image
+  contains, not about what it can do. Removing them means copying the tree with
+  the tests excluded, which changes what the image produces, so it is a packet
+  rather than a line. `test/dockerStage.test.ts` asserts the runtime stage names
+  no `test/` tree and no whole context, which is the half that matters: the
+  identity and JWKS doubles under `test/` do not ship.
 - **A shared API-key store.** Keys are issued, hashed, scoped and revoked, and a
   revoked key is dead on the next request — but the store is a `Map` in one
   process, so a key issued on one replica does not exist on the next and a
@@ -668,6 +720,8 @@ test/limitTable.ts           a one-number limit table, for tests
 test/openapiPaths.ts         reads openapi/v1.yaml and Hono's app.routes (never shipped)
 test/openapiPaths.test.ts    the reader's own contract: it raises rather than under-reads
 test/openapiDocument.test.ts the document held to the router, in both directions
+test/dockerStage.ts          reads a Dockerfile's stages and COPY chain (never shipped)
+test/dockerStage.test.ts     the test stage's file set held to the repository's
 openapi/v1.yaml              the HTTP contract, and the open decisions in its header
 bin/prime                    the gate
 Dockerfile                   oven/bun slim, multi-stage; `docker build --target test` runs the suite in the image
