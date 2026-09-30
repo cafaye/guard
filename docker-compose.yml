@@ -1,5 +1,5 @@
 ---
-# The local development stack for guard: the gateway and nothing else.
+# The local development stack for guard: the gateway, and nothing else.
 #
 #   docker compose up -d --build
 #   curl localhost:8080/healthz
@@ -8,6 +8,11 @@
 # guard talks to no database in v0, so this file declares one service. The
 # service also runs straight from the worktree with `bun run src/index.ts`,
 # which is the faster loop; compose exists to exercise the image that ships.
+#
+# The rate-limit counters are this process's memory here, which is CORRECT for
+# one replica and is not a platform limit: scale this file to two guard services
+# and each caller gets its allowance from both. Set `REDIS_URL` and bring a Redis
+# up to get one shared allowance — see README.md, "Where the counters live".
 
 services:
   guard:
@@ -28,6 +33,15 @@ services:
       # gateway asking itself for a session. identity is not in this file yet, so
       # /auth/* answers 503 until it is, the same as /v1/* above.
       IDENTITY_URL: "http://identity:8080"
+      # How many proxies append to X-Forwarded-For, and therefore how much of it
+      # the rate limiter believes. Unset is 0: no forwarding chain, so the socket
+      # peer, and every caller behind one NAT shares a bucket. Whatever proxies
+      # actually sit in front of this service belongs here.
+      # TRUSTED_PROXIES: "1"
+      # Unset keeps the counters in this process. Set it and the same Redis serves
+      # every replica and the counters survive a restart; the URL is validated at
+      # startup and the connection opens on first use.
+      # REDIS_URL: "redis://redis:6379"
     ports:
       - "8080:8080"
     healthcheck:
