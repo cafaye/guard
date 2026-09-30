@@ -58,6 +58,21 @@ read.
 *and* the `Content-Type` — `/readyz` returning 200 with the wrong shape is a
 failure, not a pass.
 
+**A test the image does not copy is not a passing test, it is a missing one.**
+`docker build --target test` is a gate, and a gate is a claim about what ran. A
+test file outside the test stage's `COPY` list is not executed and cannot fail, so
+the build stays green having verified less than it appears to — the image once ran
+392 tests across 15 files where a host ran 399 across 16, and the seven missing
+were `pins.test.ts`, the check that the image and the repository agree on the pin.
+Two things hold that down, and a new one needs both: `test/dockerStage.test.ts`
+reads the Dockerfile and fails the local gate when a test file is not in the copy
+chain, and the `image` CI job diffs the test files the *built image* discovered
+against `find`, which is the half the Dockerfile reader cannot see because
+`.dockerignore` can drop a directory out of a `COPY src ./src` and buildkit copies
+the rest. Keep the copy list explicit — `COPY . .` is always a superset, so the
+first check would pass without saying anything — and add a test file to that list
+in the same commit that adds the file.
+
 **Liveness never touches a dependency.** `/healthz` is unconditional and
 `/readyz` is the only endpoint that may fail because something else is down. A
 database or identity outage must not get the process restarted out from under

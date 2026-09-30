@@ -10,6 +10,53 @@ dependency versions follow npm's own rules.
 
 ### Fixed
 
+- **The README's stated reason the live Redis tier cannot run in the image was
+  wrong, and a reader would have been misled by it.** It claimed "buildkit refuses
+  `--network=host`". On Docker 29.4.0 the flag is **accepted** — and a `RUN` under
+  it still cannot reach a server on the host's network, so the conclusion held
+  while the mechanism did not. That is the worse combination: someone trying to
+  close the gap would find the flag accepted, see a build that looked fine, and
+  conclude the tier was easy to enable. Now states what was measured — the flag is
+  accepted and buys nothing, and the real obstacles are the absent sidecar
+  mechanism and the 30 MB of stage to install a server the `redis` job already
+  runs.
+- **`docker build --target test` now runs the same tests a host run does.** It ran
+  **392 tests across 15 files** where a host run ran **399 across 16**. The seven
+  missing were `pins.test.ts`, which sits at the repository root and which the test
+  stage's `COPY` list — `src`, `test`, `openapi` — never named. So the image never
+  executed the test that asserts the Bun pin in `package.json`, `mise.toml`, the
+  Dockerfile and compose all agree: the check that would have noticed the image
+  disagreeing with the repository was the one test the image did not run, and the
+  build was green throughout. A test file the image does not have does not fail, it
+  is not executed, so nothing in the build output said so.
+  - **`test/dockerStage.test.ts` holds the `COPY` list to the repository.** It
+    walks the tree for `*.test.ts` and fails when the test stage's copy chain does
+    not name one, so adding a test file now fails `bin/prime` until the list names
+    it. It runs wherever the suite runs — the laptop, kit's workflow, the image —
+    because a check kept outside the suite is a check somebody has to remember.
+  - **The `image` CI job diffs the image's test files against `find`.** The test
+    above reads the Dockerfile and is therefore blind to `.dockerignore`: a
+    `COPY src ./src` with an excluded subdirectory copies the rest and the build
+    stays green, which was verified against buildkit rather than assumed. The suite
+    emits every test file it discovered and CI compares the sets, so the check that
+    reads the *built image* covers the half the Dockerfile reader cannot see.
+  - **The comparison is over test files, not test counts**, on purpose: the live
+    Redis tier skips in-image by design, so the pass count legitimately differs from
+    a host run with Redis, and the file count cannot.
+  - **The list stayed explicit rather than becoming `COPY . .`.** A whole-context
+    copy is always a superset, which makes the tripwire vacuous — it would pass
+    without saying anything — and it puts the doubles in `test/` one careless edit
+    from the runtime stage. A new assertion holds the runtime stage to copying no
+    test tree and no whole context.
+  - `.dockerignore` also excluded `.gitignore`, `docker-compose.yml` and
+    `Dockerfile`, so the `COPY` list could not name the three files `pins.test.ts`
+    reads. The symptom was a hard `"/x": not found` at build time rather than a
+    silent skip, but a list naming a path the build context does not contain is
+    still a wrong list, and both files now carry the fix.
+  - Both breaks were introduced on purpose and observed going red: a root-level
+    test file the list omits, and a directory `.dockerignore` drops. In both cases
+    `docker build --target test` stayed **green** at 417 across 17 and the new
+    check reported the missing file.
 - **One Redis error reply no longer wedges the connection for the life of the
   process.** `connectRedis`'s reader caught every `parseReply` failure, consumed
   no bytes and resolved no waiter, so an `-ERR` was re-parsed on every later chunk
