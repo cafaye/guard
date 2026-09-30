@@ -31,6 +31,10 @@ import { createHash, randomUUID, randomBytes } from "node:crypto";
 import type { Context, MiddlewareHandler } from "hono";
 import { problem, type Problem } from "../problem";
 import type { AuthEnv, Principal } from "./jwt";
+// One definition of "is this request presenting an API key", because the limiter
+// reads the same header to decide whether a key reached it and two regexes would
+// eventually disagree about a scheme.
+import { hasApiKeyScheme } from "./limitKey";
 
 /** What guard hands back when it issues a key. The only time `key` exists. */
 export type IssuedApiKey = {
@@ -196,8 +200,6 @@ export function apiKeyPrefixOf(key: string): string | null {
 
 export type ApiKeyAuthOptions = {
   keys: ApiKeyStore;
-  /** Clock, for the same reason the other stores take one. */
-  now?: () => number;
 };
 
 export type ApiKeyAuth = {
@@ -222,7 +224,6 @@ export type ApiKeyAuth = {
  */
 export function createApiKeyAuth(options: ApiKeyAuthOptions): ApiKeyAuth {
   const { keys } = options;
-  const now = options.now ?? Date.now;
 
   async function lookup(c: Context): Promise<{ ok: true; record: ApiKeyRecord } | { ok: false; refusal: Problem }> {
     const secret = apiKeySecret(c);
@@ -305,13 +306,6 @@ function apiKeySecret(c: Context): string | null {
   const match = /^apikey +(\S+)$/i.exec(authorization ?? "");
 
   return match?.[1] ?? null;
-}
-
-/** The scheme test, from `./limitKey` — one definition, two callers. */
-function hasApiKeyScheme(c: Context): boolean {
-  const authorization = c.req.header("authorization")?.trim();
-
-  return typeof authorization === "string" && /^apikey(?:\s|$)/i.test(authorization);
 }
 
 function requireText(value: string, field: string): string {
