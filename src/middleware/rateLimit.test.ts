@@ -1,188 +1,372 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { rateLimit } from "./rateLimit";
+import { memoryRateLimitStore, type RateLimitStore } from "./rateLimitStore";
+import type { Principal } from "./jwt";
 
 const WINDOW_MS = 60_000;
 
-// Windows are aligned to the wall clock, so the window containing 1_000_000
-// starts at 960_000 and ends at 1_020_000 — not at 1_000_000 + WINDOW_MS. Every
-// timing below is written against these two instants, because "the last
-// millisecond of this window" and "when the allowance comes back" are both
-// properties of the aligned window, not of the clock reading that made the
-// request.
-const WINDOW_START = 960_000;
-const WINDOW_END = WINDOW_START + WINDOW_MS;
+/**
+ * The limiter mounted the way `index.ts` mounts it: after identity, so the key
+ * it reads is one the process has verified. `principal` and `apiKeyId` are put
+ * on the context by an auth middleware ahead of it, exactly as `requireJwt` and
+ * the API-key gate do.
+ */
+function app(options: {
+  limit?: number;
+  windowMs?: number;
+  store?: RateLimitStore;
+  now?: () => number;
+  trustedProxies?: number;
+}) {
+  const a = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
+  const limiter = rateLimit({
+    limit: options.limit ?? 5,
+    windowMs: options.windowMs ?? WINDOW_MS,
+    store: options.store ?? memoryRateLimitStore(),
+    trustedProxies: options.trustedProxies ?? 0,
+    now: options.now ?? (() => 0),
+    policy: () => "guard-api",
+  });
 
-function app(opts: { limit: number; now: () => number }) {
-  const a = new Hono();
-  a.use(
-    "*",
-    rateLimit({
-      limit: opts.limit,
-      windowMs: WINDOW_MS,
-      keyGenerator: (c) => c.req.header("x-client") ?? "client-a",
-      now: opts.now,
-    }),
-  );
+  a.use("*", async (c, next) => {
+    if (new URL(c.req.url).pathname === "/healthz") return next();
+    return limiter(c, next);
+  });
   a.get("/", (c) => c.json({ ok: true }));
   return a;
 }
 
-describe("rateLimit fixed window", () => {
-  test("allows requests up to the limit, then rejects with 429", async () => {
-    let now = 1_000_000;
-    const a = app({ limit: 2, now: () => now });
+const principal = (accountId: string): Principal => ({
+  sub: accountId,
+  scope: [],
+  claims: { sub: accountId, account_id: accountId },
+});
+
+describe("the limiter answers", () => {
+  test("allows up to the limit and then refuses with 429", async () => {
+    const a = app({ limit: 2 });
 
     expect((await a.request("/")).status).toBe(200);
     expect((await a.request("/")).status).toBe(200);
 
     const blocked = await a.request("/");
     expect(blocked.status).toBe(429);
-    expect(blocked.headers.get("content-type")).toContain("application/json");
-    expect(await blocked.json()).toEqual({
-      error: "rate_limited",
-      message: "too many requests",
-    });
+    expect(blocked.headers.get("content-type")).toContain("application/problem+json");
   });
 
-  test("stays rejected for the rest of the window", async () => {
-    let now = 1_000_000;
-    const a = app({ limit: 1, now: () => now });
-
-    expect((await a.request("/")).status).toBe(200);
-    expect((await a.request("/")).status).toBe(429);
-
-    // One millisecond before the window rolls over.
-    now = WINDOW_END - 1;
-    expect((await a.request("/")).status).toBe(429);
-  });
-
-  test("counts reset when a new window starts", async () => {
-    let now = 1_000_000;
-    const a = app({ limit: 1, now: () => now });
-
-    expect((await a.request("/")).status).toBe(200);
-    expect((await a.request("/")).status).toBe(429);
-
-    now = 1_000_000 + WINDOW_MS;
-    expect((await a.request("/")).status).toBe(200);
-  });
-
-  test("windows are aligned to the wall clock, not to the first request", async () => {
-    let now = 1_000_000; // window starts at 960_000
-    const a = app({ limit: 1, now: () => now });
-
-    expect((await a.request("/")).status).toBe(200);
-
-    // Step into the next window and use it up.
-    now = 1_000_000 + WINDOW_MS;
-    expect((await a.request("/")).status).toBe(200);
-    expect((await a.request("/")).status).toBe(429);
-
-    // Go back to the earlier wall clock: that earlier window is spent too.
-    now = 1_000_000;
-    expect((await a.request("/")).status).toBe(429);
-  });
-
-  test("keys are isolated from each other", async () => {
-    let now = 1_000_000;
-    const a = app({ limit: 1, now: () => now });
-
-    expect((await a.request("/", { headers: { "x-client": "a" } })).status).toBe(200);
-    expect((await a.request("/", { headers: { "x-client": "a" } })).status).toBe(429);
-    expect((await a.request("/", { headers: { "x-client": "b" } })).status).toBe(200);
-  });
-
-  test("reports limit, remaining and reset on allowed requests", async () => {
-    let now = 1_000_000;
-    const a = app({ limit: 3, now: () => now });
-
-    const first = await a.request("/");
-    expect(first.headers.get("X-RateLimit-Limit")).toBe("3");
-    expect(first.headers.get("X-RateLimit-Remaining")).toBe("2");
-    expect(Number(first.headers.get("X-RateLimit-Reset"))).toBe(WINDOW_END);
-
-    const second = await a.request("/");
-    expect(second.headers.get("X-RateLimit-Remaining")).toBe("1");
-  });
-
-  test("reports limit, remaining and reset on rejected requests", async () => {
-    let now = 1_000_000;
-    const a = app({ limit: 1, now: () => now });
-
+  test("a 429 is core's envelope, not the old {error,message} shape", async () => {
+    const a = app({ limit: 1 });
     await a.request("/");
-    const blocked = await a.request("/");
 
-    expect(blocked.headers.get("X-RateLimit-Limit")).toBe("1");
-    expect(blocked.headers.get("X-RateLimit-Remaining")).toBe("0");
-    expect(Number(blocked.headers.get("X-RateLimit-Reset"))).toBe(WINDOW_END);
+    const blocked = await a.request("/");
+    const body = (await blocked.json()) as Record<string, unknown>;
+
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("content-type")).toBe("application/problem+json");
+    expect(body["code"]).toBe("rate_limited");
+    expect(body["status"]).toBe(429);
+    expect(body["type"]).toBe("https://errors.cafaye.com/rate_limited");
+    expect(body["instance"]).toBe("/");
+    expect(body["detail"]).toBe("too many requests for this window");
+    expect(typeof body["trace_id"]).toBe("string");
+    expect(blocked.headers.get("x-trace-id")).toBe(body["trace_id"]);
   });
 
-  test("the reset instant is the aligned window end, not one window from now", async () => {
-    let now = 1_000_000; // 40s into the window that opened at 960_000
+  test("the probe endpoints are never throttled", async () => {
+    const a = app({ limit: 1 });
+
+    for (let i = 0; i < 5; i++) {
+      expect((await a.request("/healthz")).status).toBe(200);
+    }
+  });
+});
+
+describe("RateLimit-* headers", () => {
+  test("RFC 9651-era fields: RateLimit-Policy and RateLimit, as structured fields", async () => {
+    const a = app({ limit: 3, windowMs: 30_000 });
+    const res = await a.request("/");
+
+    // draft-ietf-httpapi-ratelimit-headers-11 §3: a List of Items, each a
+    // String naming the policy, with `q` for the quota and `w` for the window
+    // in seconds.
+    expect(res.headers.get("RateLimit-Policy")).toBe('"guard-api";q=3;w=30');
+
+    // §4: the same policy named, `r` for the quota available and `t` for the
+    // seconds within which that quota may be used.
+    expect(res.headers.get("RateLimit")).toBe('"guard-api";r=2;t=30');
+  });
+
+  test("the widely-deployed RateLimit-Limit/-Remaining/-Reset trio is still sent", async () => {
+    const a = app({ limit: 3 });
+    const res = await a.request("/");
+
+    expect(res.headers.get("RateLimit-Limit")).toBe("3");
+    expect(res.headers.get("RateLimit-Remaining")).toBe("2");
+    expect(Number(res.headers.get("RateLimit-Reset"))).toBeGreaterThan(0);
+  });
+
+  test("RateLimit-Reset counts down in seconds, as the field is defined", async () => {
+    let now = 0;
     const a = app({ limit: 2, now: () => now });
 
-    const res = await a.request("/");
-    const reset = Number(res.headers.get("X-RateLimit-Reset"));
+    const first = await a.request("/");
+    // Two of two requests were made instantly, so the bucket is whole again one
+    // interval later — not one window later, which is what a fixed window said.
+    expect(Number(first.headers.get("RateLimit-Reset"))).toBe(30);
 
-    // A client that trusted "one window from now" would sit idle for 40s after
-    // the allowance was already back.
-    expect(reset).toBe(WINDOW_END);
-    expect(reset).toBeLessThan(now + WINDOW_MS);
+    now = 30_000;
+    expect(Number((await a.request("/")).headers.get("RateLimit-Reset"))).toBe(0);
   });
 
-  test("a 429 says how long to wait, and the wait is not longer than the window", async () => {
+  test("X-RateLimit-Reset is the absolute epoch instant, not a countdown", async () => {
+    // This repository's own convention, kept because a client that wants a wall
+    // clock deadline should not have to reconstruct one from a delta.
     let now = 1_000_000;
-    const a = app({ limit: 1, now: () => now });
+    const a = app({ limit: 2, now: () => now });
+    const res = await a.request("/");
 
+    expect(Number(res.headers.get("X-RateLimit-Reset"))).toBe(1_030_000);
+  });
+
+  test("the three fields are correct on a 429 as well as a 200", async () => {
+    const a = app({ limit: 1 });
     await a.request("/");
+
     const blocked = await a.request("/");
 
-    const retryAfter = Number(blocked.headers.get("Retry-After"));
-    expect(retryAfter).toBeGreaterThan(0);
-    expect(retryAfter).toBeLessThanOrEqual(WINDOW_MS / 1000);
+    expect(blocked.headers.get("RateLimit-Limit")).toBe("1");
+    expect(blocked.headers.get("RateLimit-Remaining")).toBe("0");
+    expect(Number(blocked.headers.get("RateLimit-Reset"))).toBe(WINDOW_MS / 1000);
+    expect(blocked.headers.get("RateLimit")).toBe('"guard-api";r=0;t=60');
   });
 
-  test("maxClients bounds the map by dropping spent windows", async () => {
-    let now = 1_000_000;
-    const a = new Hono();
-    a.use(
-      "*",
-      rateLimit({
-        limit: 1,
-        windowMs: WINDOW_MS,
-        maxClients: 2,
-        keyGenerator: (c) => c.req.header("x-client") ?? "a",
-        now: () => now,
-      }),
-    );
+  test("a 429 says how long to wait, in whole seconds", async () => {
+    const a = app({ limit: 1, windowMs: 30_000 });
+    await a.request("/");
+
+    const blocked = await a.request("/");
+    const retryAfter = Number(blocked.headers.get("Retry-After"));
+
+    expect(Number.isInteger(retryAfter)).toBe(true);
+    expect(retryAfter).toBe(15);
+  });
+
+  test("Retry-After is never zero, so a throttled client cannot hot-loop", async () => {
+    let now = 0;
+    const a = app({ limit: 1, now: () => now });
+    await a.request("/");
+
+    for (let i = 0; i < 5; i++) {
+      const blocked = await a.request("/");
+      expect(Number(blocked.headers.get("Retry-After"))).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  test("no 200 carries a Retry-After, which means something different", async () => {
+    const res = await app({ limit: 3 }).request("/");
+
+    expect(res.headers.get("Retry-After")).toBeNull();
+  });
+});
+
+describe("key derivation, through the middleware", () => {
+  /** Puts a verified principal on the context, the way `requireJwt` does. */
+  function withJwt(limiter: ReturnType<typeof rateLimit>, accountId: string) {
+    const a = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
+    a.use("*", async (c, next) => {
+      c.set("principal", principal(accountId));
+      return limiter(c, next);
+    });
     a.get("/", (c) => c.json({ ok: true }));
+    return a;
+  }
 
-    expect((await a.request("/", { headers: { "x-client": "a" } })).status).toBe(200);
-    expect((await a.request("/", { headers: { "x-client": "a" } })).status).toBe(429);
+  test("an account with a key is limited under the account bucket", async () => {
+    // Same account, two credentials. Both must draw on the one allowance, or a
+    // caller could double its rate simply by also holding a key.
+    const store = memoryRateLimitStore();
+    const limit = 3;
+    const options = {
+      limit,
+      windowMs: WINDOW_MS,
+      store,
+      trustedProxies: 0,
+      now: () => 0,
+      policy: () => "guard-api",
+    };
 
-    // Two windows later, with more clients than the cap: the sweep drops what
-    // "a" and "b" spent to keep the map bounded.
-    now = 1_000_000 + 2 * WINDOW_MS;
-    for (const client of ["b", "c", "d"]) {
-      await a.request("/", { headers: { "x-client": client } });
+    const tokenApp = withJwt(rateLimit(options), "acc-42");
+    const keyApp = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
+    keyApp.use("*", async (c, next) => {
+      c.set("principal", principal("acc-42"));
+      c.set("apiKeyId", "key-7");
+      return rateLimit(options)(c, next);
+    });
+    keyApp.get("/", (c) => c.json({ ok: true }));
+
+    const statuses: number[] = [];
+    for (const request of [tokenApp, tokenApp, keyApp, keyApp]) {
+      statuses.push((await request.request("/")).status);
     }
 
-    // Step back into the window "a" had spent and it is allowed again. That is
-    // the price of the cap, and the reason the default is high enough that one
-    // client cannot reach it: the retained-window behaviour the earlier test
-    // pins only holds while nothing has been swept.
-    now = 1_000_000;
-    expect((await a.request("/", { headers: { "x-client": "a" } })).status).toBe(200);
+    expect(statuses).toEqual([200, 200, 200, 429]);
   });
 
-  test("rejects a limit below one at construction time", () => {
-    const keyGenerator = () => "a";
-    expect(() => rateLimit({ limit: 0, windowMs: WINDOW_MS, keyGenerator })).toThrow();
-    expect(() => rateLimit({ limit: 1.5, windowMs: WINDOW_MS, keyGenerator })).toThrow();
+  test("two accounts never share an allowance", async () => {
+    const options = { limit: 1, windowMs: WINDOW_MS, store: memoryRateLimitStore(), trustedProxies: 0, now: () => 0, policy: () => "guard-api" };
+
+    const a = withJwt(rateLimit(options), "acc-1");
+    const b = withJwt(rateLimit(options), "acc-2");
+
+    expect((await a.request("/")).status).toBe(200);
+    expect((await a.request("/")).status).toBe(429);
+    expect((await b.request("/")).status).toBe(200);
   });
 
-  test("rejects a window below one millisecond at construction time", () => {
-    expect(() => rateLimit({ limit: 1, windowMs: 0, keyGenerator: () => "a" })).toThrow();
+  test("a key alone is limited under its own id, not under the address", async () => {
+    const store = memoryRateLimitStore();
+    const options = { limit: 2, windowMs: WINDOW_MS, store, trustedProxies: 0, now: () => 0, policy: () => "guard-api" };
+    const a = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
+    a.use("*", (c, next) => {
+      c.set("apiKeyId", "key-7");
+      return rateLimit(options)(c, next);
+    });
+    a.get("/", (c) => c.json({ ok: true }));
+
+    const withKey = (key: string) =>
+      a.request("/", { headers: { authorization: `ApiKey ${key}`, "x-forwarded-for": "203.0.113.4" } });
+
+    expect((await withKey("caf_a")).status).toBe(200);
+    expect((await withKey("caf_a")).status).toBe(200);
+    expect((await withKey("caf_a")).status).toBe(429);
+    // A different key from the same address is a different caller.
+    expect((await withKey("caf_b")).status).toBe(200);
+  });
+
+  test("a caller with no credential at all is limited by address", async () => {
+    const a = app({ limit: 1, trustedProxies: 1 });
+
+    const from = (ip: string) => a.request("/", { headers: { "x-forwarded-for": ip } });
+
+    expect((await from("203.0.113.4")).status).toBe(200);
+    expect((await from("203.0.113.4")).status).toBe(429);
+    expect((await from("203.0.113.5")).status).toBe(200);
+  });
+});
+
+describe("per-route limits", () => {
+  /** One store, several policies — the shape `createApp` builds. */
+  function routed() {
+    const store = memoryRateLimitStore();
+    const policies = new Map<string, number>();
+    const a = new Hono<{ Variables: { principal?: Principal; apiKeyId?: string } }>();
+
+    a.use("*", async (c, next) => {
+      const pathname = new URL(c.req.url).pathname;
+      const auth = pathname.startsWith("/auth/");
+      const policy = auth ? "guard-auth" : "guard-api";
+      policies.set(policy, (policies.get(policy) ?? 0) + 1);
+      return rateLimit({
+        limit: auth ? 2 : 5,
+        windowMs: WINDOW_MS,
+        store,
+        trustedProxies: 1,
+        now: () => 0,
+        policy: () => policy,
+      })(c, next);
+    });
+    a.post("/auth/login", (c) => c.json({ ok: true }));
+    a.get("/v1/me", (c) => c.json({ ok: true }));
+    return { a, policies };
+  }
+
+  test("the auth surface and the API surface draw on separate allowances", async () => {
+    const { a } = routed();
+
+    for (let i = 0; i < 5; i++) expect((await a.request("/v1/me")).status).toBe(200);
+
+    // The API allowance is spent; the auth allowance is untouched.
+    expect((await a.request("/auth/login", { method: "POST" })).status).toBe(200);
+    expect((await a.request("/v1/me")).status).toBe(429);
+  });
+
+  test("the stricter policy is the one that says so", async () => {
+    const { a } = routed();
+    const login = await a.request("/auth/login", { method: "POST" });
+    const me = await a.request("/v1/me");
+
+    expect(login.headers.get("RateLimit-Policy")).toContain("q=2");
+    expect(me.headers.get("RateLimit-Policy")).toContain("q=5");
+  });
+});
+
+describe("a store that is not there", () => {
+  test("an unreachable store does not become a platform-wide 429", async () => {
+    const broken = {
+      hit: () => Promise.reject(new Error("redis: connection refused")),
+    } as RateLimitStore;
+    const a = app({ store: broken, limit: 100 });
+
+    const res = await a.request("/");
+
+    // Failing open is a choice with a cost, and the cost is named in the README
+    // and in the source: a counter-store outage removes the limiter, so the
+    // dependency is a registered readiness probe rather than something to be
+    // surprised by. Failing closed would take the whole edge down with Redis.
+    expect(res.status).toBe(200);
+  });
+
+  test("an unreachable store leaves the RateLimit headers off rather than lying", async () => {
+    const broken = { hit: () => Promise.reject(new Error("nope")) } as RateLimitStore;
+    const res = await app({ store: broken }).request("/");
+
+    expect(res.headers.get("RateLimit-Limit")).toBeNull();
+    expect(res.headers.get("RateLimit")).toBeNull();
+    expect(res.headers.get("X-RateLimit-Reset")).toBeNull();
+  });
+});
+
+describe("construction", () => {
+  test("rejects a limit below one", () => {
+    for (const limit of [0, -1, 1.5]) {
+      expect(() =>
+        rateLimit({ limit, windowMs: WINDOW_MS, store: memoryRateLimitStore(), trustedProxies: 0, policy: () => "p" }),
+      ).toThrow(RangeError);
+    }
+  });
+
+  test("rejects a window below one millisecond", () => {
+    for (const windowMs of [0, -1, 1.5]) {
+      expect(() =>
+        rateLimit({ limit: 1, windowMs, store: memoryRateLimitStore(), trustedProxies: 0, policy: () => "p" }),
+      ).toThrow(RangeError);
+    }
+  });
+
+  test("rejects a negative trusted proxy count", () => {
+    expect(() =>
+      rateLimit({ limit: 1, windowMs: WINDOW_MS, store: memoryRateLimitStore(), trustedProxies: -1, policy: () => "p" }),
+    ).toThrow(RangeError);
+  });
+
+  test("a policy name is quoted, so one containing a quote cannot inject a second item", async () => {
+    const store = memoryRateLimitStore();
+    const limiter = rateLimit({
+      limit: 1,
+      windowMs: WINDOW_MS,
+      store,
+      trustedProxies: 0,
+      policy: () => 'evil",r=999;t=1',
+    });
+    const a = new Hono();
+    a.use("*", limiter);
+    a.get("/", (c) => c.json({ ok: true }));
+
+    const res = await a.request("/");
+
+    // The name is validated, not escaped: a policy is guard's configuration, and
+    // a configured one that cannot be serialised is a startup-shaped mistake.
+    expect(res.status).not.toBe(200);
   });
 });
