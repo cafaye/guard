@@ -127,7 +127,7 @@ export function rateLimit(options: RateLimitOptions): MiddlewareHandler<AuthEnv>
         now: at,
       });
     } catch (error) {
-      return failedOpen(error, c, next);
+      return failedOpen(error, next);
     }
 
     announce(c, active, verdict, at);
@@ -240,7 +240,7 @@ function announce(
  * `RateLimit-Limit: 600` and then never refused is worse than a client told
  * nothing. The store is a registered readiness probe, so `/readyz` says so.
  */
-async function failedOpen(error: unknown, c: Context, next: () => Promise<void>): Promise<Response | void> {
+async function failedOpen(error: unknown, next: () => Promise<void>): Promise<Response | void> {
   // The message can name a host, a port and a bucket; the caller gets a request
   // with no rate-limit headers on it and no idea why.
   console.error("guard: the rate-limit store is unavailable; this request is not counted", error);

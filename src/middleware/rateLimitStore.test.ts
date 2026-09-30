@@ -49,7 +49,7 @@ describe("memoryRateLimitStore", () => {
   });
 
   test("a bucket nobody has touched starts full", async () => {
-    const store = memoryRateLimitStore({ now: () => 500_000 });
+    const store = memoryRateLimitStore();
 
     expect((await hit(store, "fresh", 10, 0)).remaining).toBe(9);
   });
@@ -212,7 +212,7 @@ describe("atomicity", () => {
 describe("bounded memory", () => {
   test("maxClients drops settled buckets so the map does not grow forever", async () => {
     let now = 0;
-    const store = memoryRateLimitStore({ maxClients: 4, now: () => now });
+    const store = memoryRateLimitStore({ maxClients: 4 });
 
     for (const key of ["a", "b", "c", "d", "e", "f"]) await hit(store, key, 1, now);
 
@@ -225,7 +225,7 @@ describe("bounded memory", () => {
   });
 
   test("a bucket in debt is never swept", async () => {
-    const store = memoryRateLimitStore({ maxClients: 1, now: () => 0 });
+    const store = memoryRateLimitStore({ maxClients: 1 });
 
     await hit(store, "a", 1, 0);
     await hit(store, "b", 1, 0);
@@ -240,7 +240,7 @@ describe("bounded memory", () => {
     // The honest statement of what `maxClients` is: it bounds settled state, not
     // admitted traffic. A flood of distinct live callers grows the map by that
     // many, which is why the default is high rather than small and clever.
-    const store = memoryRateLimitStore({ maxClients: 2, now: () => 0 });
+    const store = memoryRateLimitStore({ maxClients: 2 });
 
     for (let i = 0; i < 50; i++) await hit(store, `live-${i}`, 1, 0);
 
@@ -249,7 +249,7 @@ describe("bounded memory", () => {
 
   test("a bucket nobody has touched in a whole window is swept", async () => {
     let now = 0;
-    const store = memoryRateLimitStore({ maxClients: 1, now: () => now });
+    const store = memoryRateLimitStore({ maxClients: 1 });
 
     await hit(store, "a", 1, 0);
     now = 2 * WINDOW_MS;

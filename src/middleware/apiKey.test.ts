@@ -8,7 +8,7 @@ import {
   memoryApiKeyStore,
   type ApiKeyStore,
 } from "./apiKey";
-import { createJwtVerifier, type AuthEnv, type Principal } from "./jwt";
+import { createJwtVerifier, type AuthEnv } from "./jwt";
 
 const ACCOUNT = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 

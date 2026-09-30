@@ -25,9 +25,17 @@ export type MemoryRateLimitStoreOptions = {
    * which is the self-DoS a rate limiter exists to prevent.
    */
   maxClients?: number;
-  /** Clock, injected so a test can age a bucket without sleeping. */
-  now?: () => number;
 };
+
+/**
+ * There is no clock option here, and that is deliberate.
+ *
+ * `RateLimitRequest.now` is the only clock this store reads. A second one at
+ * construction would be a second answer to "what time is it" in the same
+ * process, and the two could disagree — a bucket aged by the constructor's clock
+ * and a request stamped by the caller's is a limiter whose arithmetic depends on
+ * which of two clocks reached it first.
+ */
 
 export type MemoryRateLimitStore = RateLimitStore & {
   /** Buckets held right now. v0 introspection, deliberately off the trait. */
@@ -46,7 +54,7 @@ const DEFAULT_MAX_CLIENTS = 100_000;
  * these disagreeing where two Redis-backed ones share one bucket.
  */
 export function memoryRateLimitStore(options: MemoryRateLimitStoreOptions = {}): MemoryRateLimitStore {
-  const { maxClients = DEFAULT_MAX_CLIENTS, now = Date.now } = options;
+  const { maxClients = DEFAULT_MAX_CLIENTS } = options;
   assertPositiveInteger(maxClients, "maxClients");
 
   /**

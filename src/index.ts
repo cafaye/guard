@@ -4,9 +4,8 @@ import { createJwtVerifier, DEFAULT_IDENTITY_ISSUER, type AuthEnv, type JwtOptio
 import { rateLimit, type RateLimitOptions } from "./middleware/rateLimit";
 import { memoryRateLimitStore } from "./middleware/rateLimitStore";
 import type { RateLimitStore } from "./middleware/rateLimitTypes";
-import { connectRedis, lazyRedis, redisRateLimitStore, type RedisCommands } from "./middleware/rateLimitRedis";
-import { createApiKeyAuth, memoryApiKeyStore, type ApiKeyStore } from "./middleware/apiKey";
-import { hasApiKeyScheme, type KeyVariables } from "./middleware/limitKey";
+import { lazyRedis, redisRateLimitStore, type RedisCommands } from "./middleware/rateLimitRedis";
+import { createApiKeyAuth, type ApiKeyStore } from "./middleware/apiKey";
 import { DEFAULT_LIMIT_TABLE, limitTable, resolveLimit, type LimitTable } from "./middleware/limits";
 import { createBffAuth, DEFAULT_IDENTITY_URL, identityProbe, type BffOptions } from "./bff/auth";
 import type { Probe, ProbeStatus } from "./probe";
@@ -57,9 +56,6 @@ export type AppOptions = {
   apiKeys?: { keys: ApiKeyStore };
 };
 
-/** Hono's variables, including everything the limiter and the key gate set. */
-type Variables = AuthEnv["Variables"] & KeyVariables;
-
 /**
  * Liveness and readiness answer even when the limiter is exhausted: a throttled
  * probe is an orchestrator that cannot see a healthy process, and the restart
@@ -74,8 +70,8 @@ const DEFAULT_CLIENT_ID = "guard";
  * Builds the app. Exported, and the only entrypoint the tests use — importing
  * this module must never open a socket.
  */
-export function createApp(options: AppOptions = {}): Hono<{ Variables: Variables }> {
-  const app = new Hono<{ Variables: Variables }>();
+export function createApp(options: AppOptions = {}): Hono<AuthEnv> {
+  const app = new Hono<AuthEnv>();
 
   // Liveness is unconditional and touches nothing. A dependency outage must not
   // get the process restarted out from under in-flight requests; that is
