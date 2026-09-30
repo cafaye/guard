@@ -73,6 +73,38 @@ consumes: []
 # >
 # > Requested: a ruling on 4 and 5 alongside 1 and 2, and an entry in core's
 # > conventions for the three code slugs so the list is not kept twice.
+#
+# > DECISION NEEDED (guard, guard-04): the rate limiter's counters are per process
+# > unless `REDIS_URL` names a shared store, and this manifest cannot say where
+# > that store is supposed to come from.
+# >
+# >  6. Redis is infrastructure, not a cafaye service, so it is not in
+# >     `dependencies` — the list is for services with a version, and Redis has
+# >     none of the platform's. But a deployment that forgets `REDIS_URL` gets an
+# >     N× limit across N replicas and a counter that resets on every deploy, and
+# >     nothing in the platform would notice. Three questions, none of which a
+# >     worker can answer:
+# >
+# >    a. Is there a managed Redis a cafaye deployment points at — a `pantry`
+# >       service, an operator's own, or something compose brings up? If it is a
+# >       platform service it probably belongs in `dependencies` and in compose.
+# >    b. Should `REDIS_URL` be **required** rather than optional, so a
+# >       multi-replica guard cannot boot without it? guard would rather fail to
+# >       start than serve an N× limit, but it does not know the replica count and
+# >       will not refuse to boot on a single-instance deployment either.
+# >    c. Are the shipped per-route numbers (`README.md`, "Per-route allowances")
+# >       platform defaults, or per-tenant configuration? Today they are code,
+# >       with only the general allowance overridable from the environment, because
+# >       a table that is half environment and half code is a table where lowering
+# >       the default is mistaken for having lowered the login limit. A platform
+# >       that wants per-tenant limits needs a decision about where that table
+# >       lives before it can be one.
+# >
+# > Also unverified and worth a ruling: the GCRA Lua in
+# > `src/middleware/rateLimitRedis.ts` is covered by a transcription, not by
+# > execution, so no test in this repository has run it. It belongs in the deploy
+# > pipeline (`TODO(guard-06)`), which is a platform answer rather than a
+# > repository one.
 dependencies:
   - name: identity
     # Provisional: no cafaye service has tagged a release yet, so this is the

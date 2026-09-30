@@ -101,6 +101,7 @@ describe("problem", () => {
       { code: "validation_failed", status: 422, title: "Validation failed" },
       { code: "account_locked", status: 423, title: "Account locked" },
       { code: "payload_too_large", status: 413, title: "Payload too large" },
+      { code: "rate_limited", status: 429, title: "Too many requests" },
     ] as const;
 
     const app = new Hono();

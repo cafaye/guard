@@ -3,6 +3,7 @@ import { createApp } from "../index";
 import { createBffAuth, identityProbe, SESSION_COOKIE, type BffOptions } from "./auth";
 import { memorySessionStore, type SessionStore } from "./session";
 import { fakeIdentity, IDENTITY_PATHS, type FakeIdentity, type Reply } from "../../test/fakeIdentity";
+import { strictTable } from "../../test/limitTable";
 
 const IDENTITY_URL = "http://identity.test:8080";
 /** The origin a browser is on. The gate compares hosts, so this is the host. */
@@ -1014,7 +1015,7 @@ describe("the /auth surface", () => {
     loginSucceeds(identity);
     const app = createApp({
       bff: { identityUrl: IDENTITY_URL, fetch: identity.fetch },
-      rateLimit: { limit: 1, windowMs: 60_000 },
+      rateLimit: { limits: strictTable(1) },
     });
 
     expect((await app.request(...post("/auth/login", { email: USER.email, password: "a" }))).status).toBe(200);
