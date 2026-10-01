@@ -152,6 +152,34 @@ that trips a store's charset check is not a loud failure: the store throws, the
 middleware fails open, and the limiter is silently off in the deployment that has
 one.
 
+**Cross-tenant is absence, and absence is not just a status code.** A resource the
+caller cannot see does not exist, and guard says the same thing it says when the
+resource does not exist. A `403` is a confirmation: it tells the caller the thing
+is real and belongs to somebody else, which is a smaller leak than the data and a
+perfectly good way to walk the platform. This holds *below* the wire too, which is
+the half that is easy to forget — `ApiKeyStore.revoke` on another account's key is
+a no-op with no error and no return value, because a distinguishable failure is the
+same oracle one layer down.
+
+The two `403`s guard writes are correct and are not tenancy: `requireScope` is a
+capability failure (the token authenticated and lacks a scope — a fact about the
+caller, which they already know) and `requireSameOrigin` is about the request.
+Neither names a resource, so neither can confirm one exists. The line is drawn in
+exactly that place and both directions are load-bearing: a `403` for *tenancy* is
+a finding to fix, and a `404` for *capability* would throw away a distinction the
+caller is entitled to.
+
+**A key id is not a tenant.** Every `ApiKeyStore` operation that acts on a record
+takes the account: `revoke(accountId, id)` and `list(accountId)`. Ids are shown
+to a holder to tell two keys apart and given to an operator for revocation, so an
+id that reached either method on its own would let any caller who learned it act on
+somebody else's credential. `list` filters on the record's own `accountId` rather
+than trusting an id set, because the store's id map is keyed by id and a
+caller-chosen id is not a guarantee. `createApiKeyAuth.issue` mints a
+`randomUUID`, which makes a collision improbable rather than impossible — and
+`TODO(guard-07)` is about to write a shared store. The rule for the whole platform
+is the same: an identifier a caller can hold is a handle, not a tenant.
+
 **Count and read in one step, or it is not a limiter.** `RateLimitStore` has one
 method and no `peek`, because a read-then-write counter admits N× the limit under
 a burst. Any new implementation is proved by `rateLimitParity.test.ts`, which
@@ -244,6 +272,37 @@ source and the tripwire would then always fail for the wrong reason.
 
 Set the environment and prove the count. A tier added without all three is a tier
 nobody will notice is not running.
+
+**An account-scoped entry point needs a negative test, and the count is asserted.**
+`test/tenantEntryPoints.test.ts` derives the enumeration from the code — the
+routes off Hono's own `app.routes`, the account-scoped store methods off the
+interface declarations, and every `status: 403` in production source — and requires
+each one to have a case named in `src/middleware/tenantIsolation.test.ts`. A new
+route or a new store method that takes an account therefore fails the gate until
+the negative case exists, and a case for something not in the table is decoration.
+
+Three things make it a check rather than a list somebody maintains, and all three
+are the ones that were wrong in its first draft:
+
+- **The expectations are derived, not transcribed.** A row that repeats the digest
+  from `bucket()` is a copy of the production logic, and it passed with the digest
+  deleted. The key is read off the transport — what `eval` was actually handed —
+  because `bucket()` is private and the observation point is the only honest one.
+- **A fixture has to assert its own pre-condition.** The listing case built its
+  colliding id through `createApiKeyAuth.issue`, which is idempotent on the
+  *hash*: the second `issue` returned early, the collision never happened, and the
+  test passed against the broken store. It now writes records straight to the
+  store and asserts the collision exists.
+- **The count is asserted against a literal, and the operation kinds are counted
+  from the rows.** read 5, list 1, update 3, delete 2 — all four present, because
+  a service that scopes reads and forgets deletes is the common shape and a table
+  with no delete row cannot be showing it.
+
+**A guard has to be shown to fail.** Five divergences were planted and reverted for
+the isolation packet, each caught by the named test; the transcript is in
+`REPORT-guard-11-isolation.md`. **Any new guard here gets a planted divergence
+before it is believed**, and if it hangs or passes on a broken source that is a
+finding about the guard, not about the source.
 
 **CI runs `bin/prime`, not a CI-only variant.** kit's `bun` job runs the same
 *steps* from kit's copy of the conventions, and the `prime` job runs guard's own

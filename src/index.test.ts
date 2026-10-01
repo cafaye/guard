@@ -502,7 +502,7 @@ describe("API keys through the app", () => {
 
     expect((await asKey()).status).toBe(200);
 
-    await keys.revoke(issued.id);
+    await keys.revoke("acc-1", issued.id);
 
     const refused = await asKey();
     const body = await refused.text();

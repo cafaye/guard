@@ -81,7 +81,7 @@ describe("the store", () => {
     await store.issue({ id: "key-1", accountId: ACCOUNT, hash: issued.hash, prefix: issued.prefix, scopes: [] });
     expect(await store.find(issued.hash)).not.toBeNull();
 
-    await store.revoke("key-1");
+    await store.revoke(ACCOUNT, "key-1");
 
     expect(await store.find(issued.hash)).toBeNull();
   });
@@ -89,8 +89,8 @@ describe("the store", () => {
   test("revoking a key that is already gone is not an error", async () => {
     const store = memoryApiKeyStore();
 
-    await store.revoke("key-1");
-    await store.revoke("key-1");
+    await store.revoke(ACCOUNT, "key-1");
+    await store.revoke(ACCOUNT, "key-1");
   });
 
   test("revoking keeps the record so an operator can see what was withdrawn", async () => {
@@ -98,7 +98,7 @@ describe("the store", () => {
     const issued = generateApiKey();
     await store.issue({ id: "key-1", accountId: ACCOUNT, hash: issued.hash, prefix: issued.prefix, scopes: [] });
 
-    await store.revoke("key-1");
+    await store.revoke(ACCOUNT, "key-1");
 
     expect((await store.list(ACCOUNT)).map((k) => k.id)).toEqual(["key-1"]);
     expect((await store.list(ACCOUNT))[0]?.revokedAt).toBeGreaterThan(0);
@@ -111,7 +111,7 @@ describe("the store", () => {
     const store = memoryApiKeyStore();
     const issued = generateApiKey();
     await store.issue({ id: "key-1", accountId: ACCOUNT, hash: issued.hash, prefix: issued.prefix, scopes: [] });
-    await store.revoke("key-1");
+    await store.revoke(ACCOUNT, "key-1");
 
     expect(await store.find(issued.hash)).toBeNull();
   });
@@ -173,7 +173,7 @@ describe("authenticating with a key", () => {
     const headers = { authorization: `ApiKey ${made.key}` };
 
     expect((await app.request("/", { headers })).status).toBe(200);
-    await store.revoke("key-1");
+    await store.revoke(ACCOUNT, "key-1");
     const res = await app.request("/", { headers });
 
     expect(res.status).toBe(401);

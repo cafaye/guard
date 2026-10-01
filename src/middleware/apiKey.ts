@@ -19,6 +19,13 @@
 //   4. Revocation takes effect on the very next request, and a revoked key is
 //      not findable at all — `find` is the only lookup, so the revocation
 //      decision cannot exist in two places and disagree with itself.
+//   5. **Every operation that names an account takes one.** `revoke` and `list`
+//      both do, and a key id is not a tenant: ids are displayed to a holder and
+//      handed to an operator for revocation, so one that reached either method
+//      on its own would let any caller who learned it act on somebody else's
+//      credential. A key belonging to another account is *absent* — no error, no
+//      refusal — so "not yours" is indistinguishable from "does not exist".
+//      `tenantIsolation.test.ts` found both halves of this missing.
 //
 // TODO(guard-07): the in-memory store here is per process and is what the tests
 // use. A multi-instance deployment needs one shared store behind this same
@@ -76,9 +83,31 @@ export interface ApiKeyStore {
   issue(record: ApiKeyRecordInput): Promise<void>;
   /** The live record for this hash, or null. Never answers for a revoked key. */
   find(hash: string): Promise<ApiKeyRecord | null>;
-  /** Withdraws a key. Absent and already-revoked are both fine. */
-  revoke(id: string): Promise<void>;
-  /** Every key an account holds, revoked ones included, for display. */
+  /**
+   * Withdraws one of `accountId`'s own keys.
+   *
+   * **The account is a parameter, not something the store looks up.** A key id
+   * on its own is not a tenant: ids are handed to a holder for display and to an
+   * operator for revocation, so any caller who learns one can name it. A
+   * revocation taking only the id would be a cross-tenant *write* — one account
+   * withdrawing another's credential, which is a denial of service wearing a
+   * support action's clothes.
+   *
+   * A key belonging to another account is **absent, not refused**: no error and
+   * no return value that distinguishes "that key is not yours" from "no such
+   * key". The record is left exactly as it was, `revokedAt` included, so an
+   * attempt that missed its scoping leaves nothing behind that an operator
+   * could mistake for a real withdrawal.
+   */
+  revoke(accountId: string, id: string): Promise<void>;
+  /**
+   * Every key an account holds, revoked ones included, for display.
+   *
+   * Account-scoped like `revoke`, and for the same reason: an unscoped listing
+   * hands one account every key on the platform, hash and prefix included, and
+   * the difference between "empty" and "refused" must not tell a caller that
+   * some *other* account holds keys at all.
+   */
   list(accountId: string): Promise<ApiKeyRecord[]>;
 }
 
@@ -129,18 +158,35 @@ export function memoryApiKeyStore(options: MemoryApiKeyStoreOptions = {}): Memor
       return record !== undefined && record.revokedAt === 0 ? record : null;
     },
 
-    async revoke(id) {
+    async revoke(accountId, id) {
       const record = byId.get(id);
-      // The record stays, so an operator can see what was withdrawn and when.
-      // Only `find` stops answering for it.
-      if (record) record.revokedAt = now();
+      // Scoped here, once, and by the record's own account rather than by the
+      // account that asked — so the check cannot be satisfied by an id that
+      // happens to be in `byAccount` and cannot be forgotten by a caller that
+      // never looked. Refusing by *not acting* is the whole answer: there is no
+      // error and no return value, so a caller cannot tell a cross-tenant revoke
+      // from a revoke of a key that was never issued.
+      if (record !== undefined && record.accountId === accountId) {
+        // The record stays, so an operator can see what was withdrawn and when.
+        // Only `find` stops answering for it.
+        record.revokedAt = now();
+      }
     },
 
     async list(accountId) {
       const held = byAccount.get(accountId);
       if (!held) return [];
 
-      return [...held].map((id) => byId.get(id)).filter((record): record is ApiKeyRecord => record !== undefined);
+      // Filtered on `record.accountId`, not merely on membership of `held`.
+      // `byId` is keyed by id alone, so two accounts holding the same id — which
+      // a shared store trusting a caller-chosen id makes possible, and which a
+      // UUID makes merely unlikely — would otherwise resolve one account's id
+      // to the *other* account's record and hand back its hash, prefix and
+      // scopes under this account's query. That is a cross-tenant read, and it
+      // is silent: the record is real, well-formed and about somebody else.
+      return [...held]
+        .map((id) => byId.get(id))
+        .filter((record): record is ApiKeyRecord => record !== undefined && record.accountId === accountId);
     },
 
     size() {
