@@ -346,6 +346,41 @@ describe.skipIf(REDIS_URL === undefined)("live redis: GCRA_LUA, executed by redi
     expect((await localB.hit("acct:1", request)).allowed).toBe(true);
   });
 
+  test("two accounts' buckets are separate keys against a real server", async () => {
+    // The tenant boundary, where it is actually load-bearing. Everything else in
+    // this file proves the script counts correctly; this proves it counts the
+    // *right things* — that exhausting one account's allowance leaves another's
+    // untouched, and that neither key holds the other's identity.
+    //
+    // `tenantIsolation.test.ts` covers the same property against the in-memory
+    // store and against the client half of this one, over a transcription of the
+    // script. A transcription cannot be wrong in the same way as the script, so
+    // this is the tier where "two accounts do not share a bucket" is a fact about
+    // Redis rather than a fact about our reading of Redis.
+    const store = live(a, "tenants");
+    const limit = 2;
+    const request = { limit, windowMs: WINDOW_MS, now: 0 };
+    const bucketA = "acct:A";
+    const bucketB = "acct:B";
+
+    for (let i = 0; i < limit; i++) expect((await store.hit(bucketA, request)).allowed).toBe(true);
+
+    // A is exhausted...
+    expect((await store.hit(bucketA, request)).allowed).toBe(false);
+    // ...and B, which sent nothing, has its whole allowance. The denial-of-service
+    // direction: a shared bucket would let one account throttle another.
+    expect((await store.hit(bucketB, request)).allowed).toBe(true);
+    expect((await store.hit(bucketB, request)).allowed).toBe(true);
+    expect((await store.hit(bucketB, request)).allowed).toBe(false);
+
+    // Two keys, and neither names an account in the clear — the digest in
+    // `bucket()` means a `KEYS guard:rl:*` scan yields no list of the accounts
+    // hitting the edge. `written` holds both because `live()` records them.
+    expect(written.has(store.keyFor(bucketA))).toBe(true);
+    expect(written.has(store.keyFor(bucketB))).toBe(true);
+    expect(store.keyFor(bucketA)).not.toBe(store.keyFor(bucketB));
+  });
+
   test("a bucket survives losing the connection it was counted in", async () => {
     // Restart is the other half of "per process": every in-memory bucket is lost
     // on restart, so a deploy is a fresh allowance for every caller at once. Redis

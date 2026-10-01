@@ -8,7 +8,72 @@ dependency versions follow npm's own rules.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two cross-tenant holes in the API-key store: a key id was a tenant.** D18
+  measured guard at zero negative tests, and the two that existed when this
+  packet started were both in `memoryApiKeyStore` — the seam `TODO(guard-07)`
+  moves to Redis, and the trait the future `/v1/api-keys` route will call.
+
+  1. **`revoke(id)` took no account at all.** A key id is not a tenant: ids are
+     displayed to a holder to tell two keys apart and handed to an operator for
+     revocation, so any caller who learned one could name it. Any caller could
+     therefore withdraw *any* account's credential — a cross-tenant **write**,
+     and a denial of service wearing a support action's clothes. It now takes the
+     account and refuses to touch a record that is not that account's:
+     `revoke(accountId, id)`.
+  2. **`list(accountId)` resolved ids through a map keyed by id alone.** Two
+     accounts holding the same id made one account's listing return the *other*
+     account's record — hash, prefix and scopes included, which is credential
+     material — under its own query. Silent, because the record returned is real
+     and well-formed. `byId` being keyed by id made a collision the only thing
+     standing between a caller and another tenant's keys, and a UUID is not a
+     guarantee, it is a probability. It now filters on the record's own
+     `accountId` rather than trusting membership of an id set.
+
+  Neither was reachable from a route today — guard has no endpoint that issues or
+  revokes a key, which the README says under "Not built yet". Both are load-bearing
+  anyway, because the signature is what the next author and the next store
+  implementation read. Both now refuse by **absence**: `revoke` on a foreign key
+  is a no-op with no error and no return value, and leaves `revokedAt` at 0, so
+  an attempt that missed its scoping leaves nothing an operator could mistake for
+  a real withdrawal.
+
+  **11 account-scoped entry points** enumerated and negatively tested, derived
+  from the code rather than declared: `test/tenantEntryPoints.test.ts` reads the
+  routes off Hono's own array, the account-scoped store methods off the interface
+  declarations, and every `status: 403` in production source, and requires each
+  to have a negative case named in `src/middleware/tenantIsolation.test.ts`. All
+  four operation kinds are covered (read 5, list 1, update 3, delete 2) — delete
+  because a service that scopes reads and forgets deletes is the common shape.
+
+  **No `403` was found for a resource the caller cannot see, and none was
+  added.** The only two `403`s guard writes are a capability failure
+  (`requireScope`: the token authenticated and lacks a scope) and an origin
+  failure (`requireSameOrigin`) — both facts about the *caller*, which they
+  already know, and neither naming a resource, so neither can confirm one exists.
+  The distinction is asserted in both directions: a tenancy `403` would be a
+  finding to fix, and a `404` for a capability would throw away a distinction the
+  caller is entitled to.
+
+  Two guard-authored defects, both found by *running* the guards and written up
+  in `REPORT-guard-11-isolation.md`: a listing fixture built through
+  `createApiKeyAuth.issue` was a silent no-op (it is idempotent on the hash, so
+  the id collision the case needed never happened, and the test passed with the
+  filter deleted), and a Redis-key assertion that recomputed `bucket()`'s digest
+  in the test passed with the digest deleted from `rateLimit.ts` — a copy of the
+  production logic is not a check on it. Both now observe the real thing: the
+  store, and the key `eval` was actually handed.
+
+  Five divergences were planted and reverted, each caught by the named test; the
+  transcript is in the report.
+
 ### Changed
+
+- **`ApiKeyStore.revoke` takes an account.** `(id: string)` → `(accountId: string, id: string)`.
+  A trait change rather than an internal edit, and the seven call sites in the
+  suite were updated with it. A store implementation written from the old
+  signature is a cross-tenant write waiting for a route.
 
 - **`core: ^0.1.0` → `^0.2.0`. The declaration was the stale half, not the code.**
   guard's content was already 0.2-shaped; the constraint was a number nobody
