@@ -8,6 +8,24 @@ dependency versions follow npm's own rules.
 
 ## [Unreleased]
 
+### Added
+
+- **`LICENSE`: guard is MIT.** The repository shipped no licence file at all,
+  which is not "unlicensed, therefore free" — it is **all rights reserved**,
+  the default copyright position when a public repository grants nothing, so a
+  stranger could not legally run, modify or resell any of it. `package.json`
+  already declared `"license": "MIT"` and is now backed by the grant itself.
+
+  MIT is the fleet decision and the reason is the service-registry model: guard
+  is the public edge every request enters through, so a consumer's first contact
+  with the fleet's licensing is guard's. MIT keeps adding guard a decision about
+  dependencies rather than about obligations; copyleft would attach one to every
+  downstream consumer.
+
+  The copyright line matches the three repositories that already shipped a
+  licence (`cafaye-py`, `cafaye-rb`, `cafaye-ts`) exactly: `Copyright (c) 2026
+  cafaye`. All fifteen now hold byte-identical licence text.
+
 ### Fixed
 
 - **Two cross-tenant holes in the API-key store: a key id was a tenant.** D18
