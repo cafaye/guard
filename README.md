@@ -530,12 +530,26 @@ IDENTITY_URL=http://identity.localhost:8080 \
   bun run src/index.ts
 ```
 
-With Docker:
+With Docker, guard's compose file is an OVERRIDE and not a stack of its own — the
+Postgres cluster, NATS, Redis, the OTel collector and the four observability
+backends all come from kit, at the commit named in `kit.ref`:
 
 ```sh
-docker compose up -d --build
+git clone https://github.com/cafaye/kit.git /tmp/kit    # at the ref in kit.ref
+KIT_COMPOSE_DIR=/tmp/kit/templates/compose \
+docker compose --project-directory . \
+  -f /tmp/kit/templates/compose/docker-compose.yml \
+  -f ./docker-compose.yml up -d --wait
 curl localhost:8080/healthz
 ```
+
+`KIT_COMPOSE_DIR` is not optional and omitting it is silent: compose resolves a
+relative path against the project directory, so without it the Postgres init
+script resolves to a directory in this repository that does not exist, Docker
+creates it empty, and the cluster comes up healthy having provisioned nothing.
+`docker-compose.yml` carries the whole argument. There is no `bin/dev` in this
+repository yet; `kit.ref` is what this repository declares about kit, and copying
+kit's `templates/bin/dev.sh` to `bin/dev` is the next step, not a precondition.
 
 `mise.toml` pins the toolchain. If you use mise, run this once per clone
 **before** the gates:
@@ -742,6 +756,8 @@ test/dockerStage.test.ts     the test stage's file set held to the repository's
 openapi/v1.yaml              the HTTP contract, and the open decisions in its header
 bin/prime                    the gate
 Dockerfile                   oven/bun slim, multi-stage; `docker build --target test` runs the suite in the image
+docker-compose.yml          guard's OVERRIDE: its own service, its own port, and nothing kit already ships
+kit.ref                     the pinned kit commit this repository's stack is fetched at
 ```
 
 Conventions live in [AGENTS.md](AGENTS.md); changes are recorded in

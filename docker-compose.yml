@@ -1,18 +1,144 @@
----
-# The local development stack for guard: the gateway, and nothing else.
+# guard's own compose file — an OVERRIDE, not a copy.
 #
-#   docker compose up -d --build
+#   KIT_COMPOSE_DIR=<kit>/templates/compose \
+#   docker compose --project-directory . \
+#     -f <kit>/templates/compose/docker-compose.yml \
+#     -f ./docker-compose.yml up -d --wait
+#
 #   curl localhost:8080/healthz
 #   curl localhost:8080/readyz
 #
-# guard talks to no database in v0, so this file declares one service. The
-# service also runs straight from the worktree with `bun run src/index.ts`,
-# which is the faster loop; compose exists to exercise the image that ships.
+#   stop, keep the data   the same two -f flags, and `down` instead of `up -d`
 #
-# The rate-limit counters are this process's memory here, which is CORRECT for
-# one replica and is not a platform limit: scale this file to two guard services
-# and each caller gets its allowance from both. Set `REDIS_URL` and bring a Redis
-# up to get one shared allowance — see README.md, "Where the counters live".
+# `<kit>` is a clone of https://github.com/cafaye/kit at the commit named in
+# `kit.ref`, which is the file at this repository's root. That one line is the
+# whole of what this repository declares about kit: WHICH BYTES of it a machine
+# runs, reviewable, identical on every clone.
+#
+# There is no kit compose file in this repository, and there is no
+# `otel-collector.yml`, no `tempo/`, no `loki/`, no `mimir/`, no `grafana/`. The
+# stack is FETCHED from the pinned ref and run BESIDE this file. This file is the
+# SECOND one, so it is an override: what is in it wins, and everything it does not
+# mention still comes from kit.
+#
+# `docker compose up -d --build` — what this file used to be run with — no longer
+# starts the whole stack, and the reason it fails rather than merely starts less
+# is at `logging:` below: the crash layer resolves `otel-collector` at start.
+# billing, courier and identity have the same property and the same note.
+#
+# THERE IS NO `bin/dev` IN THIS REPOSITORY YET, and that is why the manual form is
+# written out in full rather than summarised as one line. billing, courier and
+# identity each carry a copy of kit's `templates/bin/dev.sh`, whose own first line
+# is "kit template — the local developer loop. Copy to bin/dev in the service
+# repo." So this is not a second way of doing the same thing: for guard today it is
+# the only way, and copying that script is this repository's next step on this path
+# and nothing else.
+#
+# `KIT_COMPOSE_DIR` IS NOT OPTIONAL AND OMITTING IT IS SILENT. kit's compose file
+# resolves its own build context and its initdb bind mount through
+# `${KIT_COMPOSE_DIR:-.}`, and compose resolves a relative path against the
+# PROJECT DIRECTORY — which `--project-directory .` sets to guard's root. Drop the
+# variable and the postgres initdb mount resolves to `<guard>/postgres/initdb`, a
+# directory that does not exist, which Docker creates as an EMPTY one. The cluster
+# comes up and reports itself HEALTHY in both cases, having run no init script at
+# all: no role, no database, no `REVOKE CONNECT`, and the whole provisioning
+# contract absent behind a green health check. Measured on courier, in that
+# repository's own file, where this was found and fixed first:
+#
+#   $ docker compose --project-directory . -f <kit>/… -f ./docker-compose.yml config
+#       source: /Users/…/wt-m39-courier-27/postgres/initdb        <- courier's tree
+#   $ KIT_COMPOSE_DIR=<kit>/templates/compose docker compose … config
+#       source: /Users/kaka/.cache/cafaye/kit/f6d3b74…/templates/compose/postgres/initdb
+#
+# `docker compose config` printing that `source:` is the check for this, and it
+# needs neither a container nor a volume.
+#
+# THIS FILE OWNS THREE THINGS AND NOTHING ELSE
+#
+#   1. the `guard` service: its image, its build argument, its port, its
+#      environment
+#   2. the network it joins, so the service names in that environment resolve
+#   3. the crash layer: where this container's stdout and stderr go
+#
+# WHY THERE IS NO `postgres:` BLOCK HERE, and it is the first thing a reader will
+# look for — all three other adopters have one, and this file has none on purpose.
+#
+# guard runs no database. Not "has not got to it yet": `package.json` declares two
+# runtime dependencies, `hono` and `jose`, and the tree holds no driver, no pool,
+# no `DATABASE_URL` and no migrations. What guard keeps it fits in this process
+# (rate-limit counters, until `REDIS_URL` names a Redis) or in the caller's own
+# cookie (`__Host-bff-session`). So there is nothing for a database here to hold,
+# and `guard` in `KIT_POSTGRES_DATABASES` would be a role and a database created
+# for a service that never opens either — a name in a shared list describing no
+# fact about the world, which is the same defect kit's own template refuses to
+# commit one layer up when it hardcoded `courier`.
+#
+# WHAT THAT COSTS, stated rather than left for the first developer on a new
+# machine to find. kit's `10-cluster.sh` opens with `:?` on the variable (line 82)
+# and refuses to finish with zero databases (line 276):
+#
+#   KIT_POSTGRES_DATABASES: KIT_POSTGRES_DATABASES is unset. Name the services,
+#   comma-separated.
+#
+#   [cluster] REFUSING to finish with zero databases. An empty
+#   KIT_POSTGRES_DATABASES brings up a cluster that satisfies every statement in
+#   this script and isolates nothing.
+#
+# On this machine that message does not appear: `postgres-data` is one named
+# volume under one project name (`${KIT_STACK_NAME:-cafaye}`), created by
+# whichever service came first, and `docker-entrypoint-initdb.d` runs once per
+# volume — so the cluster is already provisioned and the service that would have
+# named a tenant is never asked. On a FRESH volume — a new laptop, a CI runner —
+# the merged stack's postgres exits and `up --wait` fails, because the one service
+# with no database has none to declare. That is kit refusing rather than
+# provisioning somebody else's database, which is the correct behaviour, and it
+# is recorded here instead of being worked around by inventing a `guard` database.
+# If it wants fixing, it is fixed in kit, for every service that needs none.
+#
+# WHAT THIS FILE MAY NOT DO, and the collector is the reason
+#
+#   It may not touch `otel-collector`. Not its image, not its command, and above
+#   all not the `volumes:` entry that mounts `otel-collector.yml`. That file
+#   carries the redaction allowlist, which kit DERIVES from core's schemas; a
+#   service that owned it would be shipping a telemetry boundary nobody derived,
+#   and a caller's session or a webhook body would leave the process inside it.
+#   kit's `tests/fleet_check.py` fails this repository over any of the three, and
+#   the moment `kit.ref` exists, that failure has no discretion left in it.
+#
+# WHY THERE IS NO `GUARD_OTEL_ENDPOINT` EITHER, and that is a real absence rather
+# than an oversight. Nothing under `src/` opens an OTLP exporter yet, so the one
+# variable that is the contract — point guard's telemetry at any endpoint and the
+# shipped collector goes quiet — has nothing at this end of it. Declaring the
+# variable would be a claim about instrumentation this repository does not have.
+# The crash layer below is not that claim: it is Docker's log driver rather than
+# an SDK, and it works whether or not guard ever exports a span.
+#
+# WHY THERE IS NO `depends_on` AT ALL — neither the collector, nor the services
+# guard actually calls
+#
+#   Nothing but the collector may be in a readiness path, and that is a gate rule
+#   rather than a preference: a service that waits for the collector serves no
+#   traffic while the collector is down, which is strictly worse than serving
+#   traffic with no traces, and it teaches people to switch telemetry off, which
+#   is the opposite of what the stack is for. kit's `tests/fleet_check.py` fails on
+#   a `depends_on` naming the collector, and its
+#   `tests/no_telemetry_in_readiness.sh` proves the property against a real
+#   collector by killing it and showing the service still serving.
+#
+#   identity and redis are the other half of the same question. Neither is in this
+#   stack — identity is a separate repository with its own compose file, and redis
+#   is optional and unset until `REDIS_URL` names one — and a gateway that refused
+#   to start because the thing it fronts is down would take `/healthz` down with
+#   it. `/healthz` is the one probe a restart can usefully act on: it asks whether
+#   this process is answering, and nothing else. Dependencies are reported in the
+#   response body instead, which is what `/readyz` is for:
+#
+#     $ curl localhost:8080/readyz
+#     {"deps":{"identity":"ok","redis":"unavailable"}}
+#
+#   So a dependency being down is a field in a response, not a container that will
+#   not start — and the healthcheck below stays a liveness probe, which is the
+#   only kind of probe that belongs in a restart decision.
 
 services:
   guard:
@@ -21,17 +147,75 @@ services:
       args:
         BUN_VERSION: "1.3.12"
     image: cafaye/guard:dev
+
+    # ON KIT'S `platform` NETWORK, and this line is not optional tidiness.
+    #
+    # kit puts every service it ships on a network called `platform`. A service in
+    # the SECOND compose file that declares no `networks:` lands on the project's
+    # `default` instead, and those are two networks in two different DNS domains —
+    # so every hostname in this service's environment stops resolving the moment it
+    # starts. The symptom at `up` is not a DNS error at all, which is what makes it
+    # worth writing down:
+    #
+    #     failed to create task for container: failed to initialize logging
+    #     driver: dial tcp: lookup otel-collector on 0.250.250.200:53: no such host
+    #
+    # The `syslog` driver below resolves `otel-collector` itself, so the container
+    # fails to START rather than to serve. `IDENTITY_URL`'s `identity` and
+    # `REDIS_URL`'s `redis` are the same lookup and would have failed later and far
+    # less legibly.
+    #
+    # It matters for guard twice over, because this is the gateway: the service it
+    # fronts and the store it shares counters through are BOTH named by service
+    # name in the environment below, and both arrive on this network — `redis` from
+    # kit's stack, `identity` from whoever is running identity's own file in the
+    # same project.
+    #
+    # Measured on courier, whose file carries the longer account. The check needs
+    # no container: `docker compose config` on the merged files prints the networks
+    # side by side, and a `guard` line on `default` next to kit's services on
+    # `platform` is the whole finding.
+    networks:
+      - platform
+
+    # A literal, and NOT a `${KIT_*:default}` — this is guard's OWN port, not one of
+    # kit's, and the rule that moves a published port onto its variable is about
+    # the ports kit SHIPS.
+    #
+    # Compose APPENDS a second file's `ports:` list rather than replacing it, so
+    # `ports: ["15433:5432"]` written under kit's `postgres` would leave postgres
+    # listening on kit's 15500 AND on 15433 — which is not the override it reads
+    # like, and it collides with the next developer on the machine. kit's
+    # `tests/fleet_check.py` reports that as a finding, and it can only report it
+    # for the services kit ships: the predicate is the service NAME, read out of
+    # kit's own compose file.
+    #
+    # There is no `guard` in kit's file, so this list has nothing to append to. It
+    # is published once, by this repository, on a port nothing else in the stack
+    # claims — which is also why `identity`, the one other service on 8080, is
+    # reached by service name above rather than through this mapping.
+    #
+    # 8080 is guard's documented port besides: the configuration table in README.md,
+    # the healthcheck below and `PORT` in the environment all name it. Moving it is
+    # a change to a published contract rather than a compose edit — which is the
+    # same sentence billing and courier make about 3000 and 4000.
+    ports:
+      - "8080:8080"
+
     environment:
       PORT: "8080"
       NODE_ENV: production
       # Issuer-only base URL — guard appends /.well-known/jwks.json itself. The
-      # default is the compose stack's identity, which is not in this file yet, so
+      # default is the compose stack's identity, which is not in this file, so
       # /v1/* answers 503 until it is; /healthz and /readyz do not care.
       IDENTITY_ISSUER: "https://identity.localhost"
       # Where the /auth calls are sent. Set explicitly because the default is
       # http://localhost:8080, which inside this container is guard itself — a
-      # gateway asking itself for a session. identity is not in this file yet, so
-      # /auth/* answers 503 until it is, the same as /v1/* above.
+      # gateway asking itself for a session. identity is not in this file: it has
+      # its own, and it joins this project by service name on the `platform`
+      # network above. So /auth/* answers 503 until identity runs beside this
+      # stack, the same as /v1/* above, and a dependency being absent is a
+      # reportable readiness answer rather than a reason not to start.
       IDENTITY_URL: "http://identity:8080"
       # How many proxies append to X-Forwarded-For, and therefore how much of it
       # the rate limiter believes. Unset is 0: no forwarding chain, so the socket
@@ -41,13 +225,55 @@ services:
       # Unset keeps the counters in this process. Set it and the same Redis serves
       # every replica and the counters survive a restart; the URL is validated at
       # startup and the connection opens on first use.
+      #
+      # That `redis` is kit's, out of the fetched stack — one of the services this
+      # repository no longer keeps a copy of — and it is why `networks:` above is
+      # load-bearing rather than decorative. Set it and the counters are shared
+      # with every guard replica; unset and they are this process's memory, which
+      # is correct for one replica and is not a platform limit.
       # REDIS_URL: "redis://redis:6379"
-    ports:
-      - "8080:8080"
+
+    # THE CRASH LAYER, and it is the reason a panic reaches an operator with no
+    # per-language log SDK in this repository — guard's `package.json` has two
+    # runtime dependencies and neither is one.
+    #
+    # Every one of the six languages writes a fatal error to stderr; in a container
+    # that is the log stream. Docker's `syslog` driver ships it over the compose
+    # network to the collector's `syslog/crash` receiver, which makes a panic a log
+    # record with a `service.name` on it and no per-language dependency at all.
+    #
+    # `syslog` rather than `filelog` on `/var/lib/docker/containers`, and that is a
+    # portability decision with a history: the filelog form works on a Linux host and
+    # does not work at all under Docker Desktop or OrbStack, where the daemon's
+    # filesystem lives inside a VM the host cannot bind-mount without asking for a
+    # shared directory. The syslog driver delivers the same bytes from the same
+    # place on every platform.
+    #
+    # NO HOST PORT, and the receiver it talks to is not published either. A syslog
+    # receiver on the host loopback is an unauthenticated log-injection point for
+    # anything else on the machine.
+    #
+    # `tag` is the process identity the collector promotes to `service.name` when a
+    # record has none — see `transform/cafaye_logs`. It has to match the service
+    # name or a crash is filed against `unknown`.
+    #
+    # And it is why this file cannot be run on its own any more: the driver
+    # resolves `otel-collector` when the container starts, so `docker compose up`
+    # against this file ALONE fails to start guard rather than starting it without
+    # traces. That is the same trade billing and courier make, and it is why the
+    # command at the top of this file carries two `-f` flags.
+    logging:
+      driver: syslog
+      options:
+        syslog-address: "tcp://otel-collector:15514"
+        tag: "guard"
+
     healthcheck:
       # Liveness, not readiness: the point is "is this process answering", which
-      # is the one question a restart can usefully act on. A dependency outage
-      # is /readyz's to report and must not restart the gateway.
+      # is the one question a restart can usefully act on. A dependency outage is
+      # /readyz's to report and must not restart the gateway — see the
+      # `depends_on` paragraph at the top of this file for why that is a rule here
+      # rather than a preference.
       test:
         - CMD
         - bun
