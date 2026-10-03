@@ -29,7 +29,7 @@
 // ## What is not in the document, and why that is a decision
 //
 // `app.use(…)` mounts, and nothing else. `/v1/*` is the prefix the bearer-token
-// gate and — once the routing packet lands — the pass-through to the services
+// gate and — when a route table is configured — the pass-through to the services
 // behind guard are mounted on; it has no method, no response and no body of its
 // own, so OpenAPI has nothing to describe it as. Hono records every middleware
 // mount with the method `"ALL"`, which is what separates a mount from a route

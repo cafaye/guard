@@ -12,8 +12,8 @@ cafaye deployment: it authenticates callers, limits what they can ask for, and
 service.
 
 v0 terminates real auth — RS256 tokens verified against identity's JWKS — and
-routes nothing. The README's "Not built yet" list is the source of truth for what
-this repository does not claim.
+forwards a configured path prefix to the service that owns it. The README's "Not
+built yet" list is the source of truth for what this repository does not claim.
 
 ## Layout
 
@@ -31,6 +31,8 @@ src/middleware/rateLimitStore.ts   GCRA in memory, per process
 src/middleware/rateLimitRedis.ts   GCRA in Redis, one Lua script, plus RESP2
 src/middleware/apiKey.ts     API keys — issue, authenticate, revoke
 src/middleware/assert.ts     configuration checks, one RangeError each
+src/routes/table.ts         which prefix goes where — validated, and the resolver
+src/routes/proxy.ts         the pass-through: rebuild the path, attach guard's credential
 src/bff/auth.ts         the /auth surface — identity calls, the cookie, the origin gate
 src/bff/session.ts      SessionStore + the in-memory v0 implementation
 test/fakeIdentity.ts    a stand-in for identity's auth API; the image never gets it
@@ -217,6 +219,18 @@ key-set URL and both durations, and `runtimeOptions` does it for the environment
 The one exception is *absent*: an app built with no `rateLimit` option runs
 unlimited, which is the honest v0 default, and an app built with no `jwt` option
 serves probes only.
+
+**A credential crossing to a service is guard's to choose.** The caller's inbound
+`Authorization` is never forwarded past the edge, and neither is their `Cookie`:
+if a caller can set an arbitrary `Authorization` and have it reach pantry, guard
+is a confused deputy and the caller authenticates to the edge before choosing who
+they are behind it. `src/routes/proxy.ts` enforces it as an outbound header
+*allowlist*, so a header nobody thought of cannot become a smuggling channel,
+and a table entry with no token sends no `Authorization` at all — which is a
+different thing from one guard invented. `GET /auth/me` holds the same line for
+identity by taking the stored token from the session. A future route that
+genuinely needs a caller's own bearer downstream has to say so, name its scope
+check, and be argued for in review; it is not a default to be widened into.
 
 **Deps are `hono`, `jose` and nothing else.** Reasoning in
 [README.md](README.md#why-hono-and-bun). `jose` earns its place because signature
