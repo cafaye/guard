@@ -133,24 +133,37 @@ gate:
       # substring of a longer line. `seen` is the LAST match, so a run that
       # printed 428 and then something smaller is still caught.
       match: '^\s*([0-9]+) pass$'
-      # 423, against a measured 428. The margin is deliberate and small, and
+      # 462, against a measured 467. The margin is deliberate and small, and
       # it is the same margin muse and courier use (890 for 895, 530 for 535):
       # a floor at exactly today's number is a floor that has to be raised by
       # hand before a single test can be added, and a ratchet nobody can move
       # is a ratchet that gets deleted. It is still a detector — a suite that
       # quietly lost six tests is `gate.floor`, which is a failure.
       #
-      # 428 is the number for a run with NO Redis, which is what `bin/prime`
+      # 467 is the number for a run with NO Redis, which is what `bin/prime`
       # does: it never sets `GUARD_REDIS_URL`, so the live tier is always
-      # skipped here. A run WITH Redis prints 442 and clears this floor by 19.
+      # skipped here. A run WITH Redis prints 482 and clears this floor by 20.
       # The floor is set from the smaller of the two on purpose — a
       # declaration that only holds when an environment variable happens to be
       # exported is a declaration that is red on a clean machine.
-      minimum: 423
+      #
+      # RAISED 423 -> 462, MEASURED, and the delta is the finding rather than
+      # the fix. The floor had been sitting 44 below the tree while the comment
+      # above it still said "against a measured 428": it was accurate when
+      # written and wrong by the time of the next three landings, and nothing
+      # said so, because a floor below the truth passes every check that reads
+      # it. gate_check.py cannot see this direction at all — it reports a floor
+      # ABOVE the tree, which is the loud one. `harness/floors_check.py` is
+      # the checker that measures it, and it reported:
+      #
+      #     declared:  pass 423
+      #     measured:  467 pass   (no Redis; `bin/prime` never sets the URL)
+      #     verdict:   below
+      minimum: 462
     # ---------------------------------------------------------------------
     # The structural detector, and the one proof here that is immune to the
     # environment-gated tier. `Ran N tests across M files` counts every
-    # REGISTERED test, so it reads 442 across 19 with Redis and 442 across 19
+    # REGISTERED test, so it reads 482 across 21 with Redis and 482 across 21
     # without it. That invariance is the whole reason it is here.
     - id: files
       # The test count is non-capturing on purpose: `minimum` is read from the
@@ -160,7 +173,7 @@ gate:
       # exactly that finding — the check working on the declaration that
       # declares the checks.
       match: '^Ran [0-9]+ tests across ([0-9]+) files\.'
-      # 19 exactly, and not a rounded number. There is no margin here and that
+      # 21 exactly, and not a rounded number. There is no margin here and that
       # is a DIFFERENT rule from the one on the floor above, for a measured
       # reason: deleting `test/noSkips.test.ts` took the suite from 428 to 423
       # — five tests — and 423 is exactly the `pass` floor, so that proof stayed
@@ -169,10 +182,25 @@ gate:
       # `pass` is pure loss here, and losing it is what let a five-test deletion
       # through the other floor.
       #
+      # RAISED 19 -> 21, MEASURED. Two test files have landed since this number
+      # was written and it did not move, which is the whole defect in one line:
+      # `19` was exact when written and is two below the tree now, and a floor
+      # two below the tree is a floor that has stopped checking. The same sweep
+      # that read `pass` read this one:
+      #
+      #     declared:  files 19
+      #     measured:  Ran 482 tests across 21 files
+      #     verdict:   below
+      #
+      # `test/dockerStage.test.ts` and `test/tenantEntryPoints.test.ts` are what
+      # took it from 19 to 21; both are named in AGENTS.md, and both are in the
+      # Dockerfile's test stage, so the `image` job's `find` diff below already
+      # agrees with 21 rather than with this floor.
+      #
       # It is the same set the `image` CI job diffs against `find`; this is the
       # cheap half, running everywhere the gate runs, and the image job is the
       # half that reads the built tree rather than the source.
-      minimum: 19
+      minimum: 21
     # ---------------------------------------------------------------------
     # The step markers, and the reason there are three of them.
     #
