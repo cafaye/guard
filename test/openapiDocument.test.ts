@@ -29,7 +29,7 @@
 // ## What is not in the document, and why that is a decision
 //
 // `app.use(…)` mounts, and nothing else. `/v1/*` is the prefix the bearer-token
-// gate and — once the routing packet lands — the pass-through to the services
+// gate and — when a route table is configured — the pass-through to the services
 // behind guard are mounted on; it has no method, no response and no body of its
 // own, so OpenAPI has nothing to describe it as. Hono records every middleware
 // mount with the method `"ALL"`, which is what separates a mount from a route
@@ -67,11 +67,13 @@ const DOCUMENT_PATH = "openapi/v1.yaml";
 const EXCLUSIONS = new Map<string, string>([
   [
     normaliseOperation(MOUNT_METHOD, "/v1/*"),
-    "the `/v1/*` prefix itself: the bearer-token gate is mounted on it, and the routing " +
-      "packet mounts the pass-through to the services behind guard on it. It is a mount, not " +
-      "a route — it has no method and no response of its own, so there is no operation to " +
-      "document. Excluded as this exact method+path pair and NOT as a `/v1/` prefix, so a " +
-      "route added under `/v1/` next year is still required to be in the document.",
+    "the `/v1/*` prefix itself: the bearer-token gate is mounted on it, and the pass-through to the " +
+      "services behind guard is mounted on it whenever a route table is configured. Neither is an " +
+      "operation — each has no method and no response of its own, so there is nothing to document — and " +
+      "a routed subtree is not describable as operations anyway: the paths under it belong to the service, " +
+      "and which ones exist is decided by configuration rather than by this file. Excluded as this exact " +
+      "method+path pair and NOT as a `/v1/` prefix, so a route added under `/v1/` next year is still " +
+      "required to be in the document.",
   ],
   [
     normaliseOperation(MOUNT_METHOD, "/*"),
@@ -87,14 +89,19 @@ const EXCLUSIONS = new Map<string, string>([
  *
  * Nothing is fetched and no socket is opened: `createApp` is importable without
  * serving, which is the whole reason the tests import the factory rather than the
- * process. `rateLimit: {}` is a real limiter over the in-memory store, and
- * `bff` points at an identity that is never called because no request is made.
+ * process. `rateLimit: {}` is a real limiter over the in-memory store, `bff`
+ * points at an identity that is never called because no request is made, and
+ * `routes` is a real route table — which is the reason it is here. The route set
+ * is the union over configurations, so an app built without a table would not
+ * have the pass-through mounted, and a mount that exists in some deployments
+ * would be invisible to this check.
  */
 const app = createApp({
   jwt: { issuer: "https://identity.localhost", audience: "guard" },
   bff: { identityUrl: "http://identity.invalid:8080" },
   apiKeys: { keys: memoryApiKeyStore() },
   rateLimit: {},
+  routes: { "/v1/pantry": { baseUrl: "http://pantry.invalid:8080", token: "not-a-real-token" } },
 });
 
 const surface = routerSurface(app.routes);

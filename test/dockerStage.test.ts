@@ -162,7 +162,7 @@ describe("the runtime stage", () => {
   test("copies no test tree and no whole context", () => {
     // What this asserts, precisely: the runtime stage names neither `test/` nor
     // the whole build context. It does NOT assert that no test file reaches the
-    // image — 13 `src/**/*.test.ts` do, because `COPY src ./src` takes the
+    // image — every `src/**/*.test.ts` does, because `COPY src ./src` takes the
     // directory as it is. They are dead weight in a shipped image, not a
     // reachable path: nothing imports them, and `bun:test` is a runtime builtin
     // rather than a dependency the production tree installs. Fixing it means

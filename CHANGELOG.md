@@ -10,6 +10,50 @@ dependency versions follow npm's own rules.
 
 ### Added
 
+- **Routing: a configured path prefix is forwarded to the service that owns it.**
+  This is the packet `guard`'s README has been promising since v0: a route table
+  (`ROUTE_TABLE`) of prefix → `{baseUrl, token?}`, validated at startup, mounted
+  as a pass-through on `/v1/*`. `GET /v1/pantry/items` reaches
+  `http://pantry:8080/items`.
+
+  **The credential rule is the content of it.** guard attaches the credential; a
+  caller's `Authorization` is never forwarded to a service, and neither is their
+  `Cookie`. Forwarding it would make guard a confused deputy — the caller
+  authenticates to the edge and then chooses who they are behind it, and every
+  property "guard is the only door" rests on is gone. It is enforced by an
+  allowlist of what crosses (`content-type`, `accept`, and the table's own
+  token), because a deny list has to have thought of `Authorization`, `Cookie`,
+  `X-Forwarded-For` and every header a future proxy invents. A table entry with
+  no token is sent no `Authorization` at all, which is different from one guard
+  invented. `GET /auth/me` holds the same line for identity by taking the stored
+  token.
+
+  **Failures behind the edge are translated.** A 5xx, a 3xx and a dead socket
+  become a `503` and one fixed sentence; the host, port, stack and `Location` go
+  to the log, which records the target, the status and the shape of the body and
+  never the body. A 2xx and a 4xx cross unchanged, because a 401 that became a
+  200 reports a refusal as a success. A service also cannot write the browser's
+  BFF session: `set-cookie` is not relayed, and that is session fixation arriving
+  through the gateway rather than tidiness.
+
+  **Every value in the table is a startup error**, for the reason
+  `REDIS_URL=redis//redis` is: a prefix outside `/v1/`, a glob, a `.`/`..`
+  segment, a base URL carrying a path or credentials, a token carrying a newline,
+  and `{}` all refuse to boot. `/v1/me` is refused as a prefix because it is
+  guard's own route and an entry that can never fire is a claim rather than a
+  configuration.
+
+  The upstream path is **rebuilt** rather than forwarded — each segment decoded,
+  refused and re-encoded — so a traversal is not filtered, it is not expressible.
+  Routed traffic is authenticated and rate limited for free: both gates are above
+  the mount. No retry, no discovery, no proxy library: `fetch` is the tool, and a
+  retry would multiply load on a service that is already failing while the limiter
+  counts one attempt.
+
+  A **static table** is the design and not only the scope: `RouteTable` is a
+  plain object, so the service registry that does not exist yet would *populate*
+  it — a different `runtimeOptions`, nothing else changed.
+
 - **`LICENSE`: guard is MIT.** The repository shipped no licence file at all,
   which is not "unlicensed, therefore free" — it is **all rights reserved**,
   the default copyright position when a public repository grants nothing, so a

@@ -1,16 +1,18 @@
 # guard
 
 The cafaye public gateway. It is the only door into a cafaye deployment:
-`guard` authenticates callers, limits what they can ask for, and (later)
-forwards requests to the service that owns the work.
+`guard` authenticates callers, limits what they can ask for, and forwards
+requests to the service that owns the work.
 
-**Status: v0 has working auth, a browser login surface, API keys, and no
+**Status: v0 has working auth, a browser login surface, API keys, and
 routing.** Tokens are verified for real against identity's published keys; a
 browser signs in through guard and comes away with a session cookie instead of a
-token; a script can hold a scoped, revocable API key; no request is proxied to a
-service yet. Rate-limit counters are per process unless `REDIS_URL` names a
-shared store, and sessions are always per process. See
-[Not built yet](#not-built-yet) before relying on anything here.
+token; a script can hold a scoped, revocable API key; a configured path prefix
+is forwarded to the service that owns it, carrying a credential guard chose
+rather than one the caller sent. Rate-limit counters are per process unless
+`REDIS_URL` names a shared store, and sessions are always per process. Routing is
+a **static configured table**, not a service registry — see [Routing](#routing)
+and [Not built yet](#not-built-yet) before relying on anything here.
 
 ## Endpoints
 
@@ -19,6 +21,7 @@ shared store, and sessions are always per process. See
 | GET    | `/healthz`       | no             | **never**    | always `200 {"status":"ok"}` — liveness, touches nothing     |
 | GET    | `/readyz`        | no             | **never**    | `200 {"deps":{…}}`, or `503` if a registered probe is down   |
 | GET    | `/v1/me`         | bearer or key  | yes (`guard-api`) | `200` echoing the verified `{sub, scope, claims}`      |
+| `*`    | `/v1/<prefix>/…` | bearer or key  | yes (`guard-api`) | forwarded to the service the table names, prefix removed — see [Routing](#routing) |
 | POST   | `/auth/register` | same-origin    | yes (`guard-auth-register`) | `201 {id, email}`. No session: a registration is not a login |
 | POST   | `/auth/login`    | same-origin    | yes (`guard-auth-login`) | `200 {expires_at}` + the `__Host-bff-session` cookie |
 | POST   | `/auth/logout`   | same-origin    | yes (`guard-auth-logout`) | `204`, cookie cleared, identity asked to revoke    |
@@ -32,8 +35,17 @@ The two probe endpoints are exempt from the limiter, and the reason is not
 tidiness: a throttled probe is an orchestrator that cannot see a healthy process,
 and the restart that follows is worse than the traffic it was guarding against.
 
-`/v1/me` exists to prove the auth chain end to end and forwards nothing. It is
-replaced by routed traffic when the routing packet lands.
+`/v1/me` forwards nothing and is not a placeholder for anything. It exists to
+prove the auth chain end to end, and it stays because a deployment needs a route
+it can call to check that chain without asking a service for anything. It is
+registered *before* the pass-through, so Hono answers it first and no service
+sees it — and the route table refuses `/v1/me` as a prefix, because an entry
+that can never fire is a claim rather than a configuration.
+
+The routed row is a **mount**, not a route: which prefixes exist is decided by
+configuration, so there is no operation to name and no method to state.
+[Routing](#routing) is its documentation, and
+[The HTTP contract](#the-http-contract) is where the document says so.
 
 The two shapes an error can take, and why, is a **DECISION NEEDED** — see
 [Errors](#errors).
@@ -41,8 +53,13 @@ The two shapes an error can take, and why, is a **DECISION NEEDED** — see
 ## The HTTP contract
 
 [`openapi/v1.yaml`](openapi/v1.yaml) is guard's OpenAPI 3.1 document, and it
-describes the seven operations in the table above and nothing else. It is what a
-generated client is built from, so it is held to the router by
+describes the seven operations in the table above and nothing else — which is
+**not** the same as "everything the gateway answers": a configured
+[route table](#routing) forwards a whole subtree of paths whose names belong to
+the services behind guard, and OpenAPI describes paths rather than subtrees. The
+document's header says so, and so does this section.
+
+It is what a generated client is built from, so it is held to the router by
 [`test/openapiDocument.test.ts`](test/openapiDocument.test.ts), which reads the
 document and Hono's own `app.routes` and fails if either describes an operation
 the other does not.
@@ -56,19 +73,135 @@ Three things about that check are worth knowing before trusting it:
   other, and a green check over nothing is worse than no check.
 - The route set comes from the **program's own definitions**, not from a list
   written out in a test, which is the shape that can only fail for a name
-  somebody remembered.
+  somebody remembered. That includes the mount: the app in that test is built
+  with a route table, so the pass-through is registered and the check sees it.
 
 `/v1/*` and `/*` are in neither side's operation set: they are `app.use(…)`
-mounts, and Hono records every mount with the method `ALL`. They are excluded as
-exact method+path pairs, **not** as a `/v1/` prefix — a route added under `/v1/`
-next year is a `GET` and is not covered by that carve-out. `GET /v1/me` is under
-that prefix and is in the document, which is the standing proof.
+mounts, and Hono records every mount with the method `ALL`. `/v1/*` now carries
+two of them — the bearer-token gate, and the pass-through when a route table is
+configured — and they collapse onto one key for exactly that reason. Both are
+excluded as exact method+path pairs, **not** as a `/v1/` prefix — a route added
+under `/v1/` next year is a `GET` and is not covered by that carve-out.
+`GET /v1/me` is under that prefix and is in the document, which is the standing
+proof.
 
 The document's header records **seven departures from
 [`core/docs/openapi-conventions.md`](../core/docs/openapi-conventions.md)** as
 open decisions rather than resolving them locally. The most consequential is that
 `cafaye.yml` still has no `exposes` block: the document the omission was waiting
 for now exists, and pointing the platform's `caf gen` at it is the manager's call.
+
+## Routing
+
+A configured path prefix goes to the service that owns it. That is the whole of
+v0 routing: a static table read from `ROUTE_TABLE`, validated at startup, and a
+`fetch` — no registry, no discovery, no proxy library.
+
+```sh
+ROUTE_TABLE='{"/v1/pantry":{"baseUrl":"http://pantry:8080","token":"…"}}'
+```
+
+With that table, `GET /v1/pantry/items?limit=2` is sent to
+`http://pantry:8080/items?limit=2` and the answer is relayed. A path no prefix
+claims is guard's own `404`.
+
+**Static is the right design here, not just the right scope.** The set of
+services in a deployment is small, known, and changes with a deploy rather than
+at runtime, so a table is the honest shape now. It is also the shape a registry
+would *populate*: `RouteTable` is a plain object, so filling it from discovery
+means writing a different `runtimeOptions` and changing nothing in `createApp`,
+the middleware or the matching rule.
+
+### What is validated, and why each refusal is at startup
+
+`ROUTE_TABLE` is read by `runtimeOptions` and checked by
+[`src/routes/table.ts`](src/routes/table.ts) before the app is built. A malformed
+value is a refusal to boot, for the reason `REDIS_URL=redis//redis` is:
+
+| Value                                                       | Why it is refused                                                   |
+| ----------------------------------------------------------- | ------------------------------------------------------------------ |
+| not JSON, or not an object                                  | `JSON.parse`'s own message names a character position in a string the operator never wrote; guard's names the variable |
+| a prefix outside `/v1/`                                     | the pass-through is mounted on `/v1/*`, so it could never match — a route that silently forwards nothing |
+| a glob (`*`, `?`)                                            | a prefix is a path, not a second matching language                 |
+| a `.` or `..` segment, encoded or not                        | a traversal configured on purpose, in the notation a caller's path arrives in |
+| `/v1/me`                                                     | it is guard's own route, registered before the pass-through; an entry that can never fire is a claim, not a configuration |
+| a base URL with a path, a query, a fragment or credentials   | the caller's path is appended to it, so a base with a path puts the request somewhere nobody serves it — and a base with a password is a password in a log line |
+| a token containing whitespace or a control character         | it is written into an `Authorization` header verbatim, so a newline in it is header injection configured on purpose |
+| `{}`                                                         | `ROUTE_TABLE={}` forwards nothing, and an operator would find out from 404s |
+
+### The credential rule, which is the part that matters
+
+**guard attaches the credential. The caller's `Authorization` is never forwarded
+to a service, and neither is their `Cookie`.**
+
+If a caller could set an arbitrary `Authorization` and have it reach pantry,
+guard would be a confused deputy: the caller authenticates *to guard* and then
+chooses who they are *downstream*. Every property "guard is the only door" rests
+on — that the credential a service sees is one guard issued or verified — would
+be gone, and an attacker would need no credential for the service at all, only a
+valid one for the edge. `GET /auth/me` already holds this line for identity by
+taking the **stored** token from the session; routed traffic is the same shape
+pointed at a service.
+
+It is enforced by an **allowlist** of what crosses: `content-type` and `accept`,
+plus the table entry's own `token` when one is configured. A header this gateway
+does not name cannot be a smuggling channel, which is a property a deny list
+never has — a deny list has to have thought of `Authorization`, `Cookie`,
+`X-Forwarded-For` and every header a future proxy invents.
+
+A table entry with no `token` is sent **no** `Authorization` header at all,
+which is a different thing from one this process invented.
+
+**What this costs, stated plainly.** An upstream cannot tell which caller sent a
+request: the per-service `token` is a service credential, not a delegation, and
+no header here asserts who the caller was. Propagating a verified principal is a
+deliberate decision with both halves written — guard asserting it *and* the
+service checking it — and it is not built. See
+[Not built yet](#not-built-yet).
+
+### Failures behind the edge are guard's to translate
+
+| From the service                       | To the caller                                             |
+| -------------------------------------- | --------------------------------------------------------- |
+| `2xx`                                  | relayed, status and body                                  |
+| `4xx`                                  | relayed, status and body — a 401 that became a 200 would report a refusal as a success, and a 422 that became a 400 would drop the field errors a form turns into sentences |
+| `5xx`, `3xx`, or a dead socket         | `503` and one fixed sentence                              |
+
+The underlying reason — a host, a port, a stack trace, a `Location` — goes to the
+log, which records the target, the status and the *shape* of the body and never
+the body itself, because a dependency's error page is exactly where a credential
+turns up. A 3xx is translated rather than followed or relayed: `fetch` follows
+redirects by default, and the `Location` an internal service answers with is an
+address that is not on the internet.
+
+Coming back, only `content-type` is relayed. `set-cookie` is dropped and that is
+not tidiness — a service answering `Set-Cookie: __Host-bff-session=…` would be
+writing the browser's BFF session from behind the edge on an origin where the
+`__Host-` prefix is honoured. The one header added rather than forwarded is
+`cache-control: no-store`: proxied traffic is authenticated, and a response held
+in a cache between here and the caller is an account's data at rest.
+
+There are **no retries**. A retry multiplies load on a service that is already
+failing, and the limiter counts one attempt, so a retry would make the
+accounting describe traffic guard never refused.
+
+### What a routed path goes through
+
+Everything a route does, in the order the app registers it: the API-key gate, the
+`/v1/*` bearer gate, the limiter, then `/v1/me` for the one path guard owns, then
+the pass-through. So a routed request is **authenticated and rate limited**
+without either of those knowing that routing exists — and an anonymous request to
+a configured prefix is a `401` with no service contacted. Routed paths spend the
+`guard-api` allowance, the same budget as the rest of `/v1/`; a per-prefix
+allowance is not configurable yet because the limit table is code and the
+prefixes are configuration, and that pairing is [Not built
+yet](#not-built-yet).
+
+The upstream path is **rebuilt**, never forwarded as received: each segment is
+decoded, refused if it is `.`, `..`, empty or holds a separator, and re-encoded.
+A traversal is therefore not filtered, it is not expressible — with the caveat
+that the URL parser resolves `..` and `%2e%2e` *before* guard sees the path, so a
+`..` can only climb to another configured prefix or out of `/v1` and into a `404`.
 
 ## Auth
 
@@ -474,6 +607,7 @@ environment, so a test can build two differently configured apps in one process.
 | `TRUSTED_PROXIES`        | `0`                         | How many proxies append to `X-Forwarded-For`, and therefore how much of it is believed. `0` believes none of it and keys on the socket peer. |
 | `REDIS_URL`              | unset                       | `redis://` or `rediss://` — host and port, no path. Set it and the counters are shared by every replica and survive a restart. Unset and they are this process's memory. |
 | `REDIS_PREFIX`           | `guard:rl`                  | Sub-namespace inside guard's own, so two guards or two environments sharing one Redis do not read each other's buckets. |
+| `ROUTE_TABLE`            | unset                       | One JSON object of path prefix → `{baseUrl, token?}`: where each prefix goes. Unset and guard forwards nothing. Every prefix must be under `/v1/`, and every value in it is validated at startup — see [Routing](#routing). |
 
 `IDENTITY_URL` is a second variable for one service on purpose. The issuer is an
 https origin in every environment, including the compose stack; the address guard
@@ -489,6 +623,12 @@ boot rather than quietly fetching identity on every request.
 deliberate: `REDIS_URL=redis//redis` is a mistake worth refusing to boot over,
 while a Redis that is *down* is somebody else's outage, and a gateway that will
 not start without its counter store has turned it into its own.
+
+`ROUTE_TABLE` is validated at startup and never connected: there is nothing to
+connect to, because a table is a value. It is refused on every malformed shape
+listed in [Routing](#routing), which is the same rule for the same reason —
+`ROUTE_TABLE={"/v1/p*":"http://pantry"}` is a routing decision that would never
+fire, and a gateway that started anyway would answer 404 for it forever.
 
 ## Why Hono and Bun
 
@@ -646,9 +786,32 @@ in one fails the gate instead of quietly testing one runtime and shipping anothe
 Each line is a packet, not a plan. The stubs that stand in for them are marked in
 the source with the packet that replaces them.
 
-- **Routing.** No request is proxied to a service. The service registry that
-  decides where a path goes does not exist yet, and `/v1/me` is a placeholder
-  for the surface that will replace it.
+- **The service registry.** Routing exists and is a **static configured table**:
+  `ROUTE_TABLE` says which prefix goes where, it is validated at startup, and it
+  is the thing a registry would *populate*. What does not exist is discovery,
+  health, or dynamic registration — a service appearing at runtime is a different
+  packet, and it is written as one because naming it here is how this one grows
+  past what it can hold. `RouteTable` is a plain object so that the swap is a
+  populate rather than a rewrite.
+- **A service cannot tell which caller sent a request.** Routed traffic carries
+  guard's own per-service credential and no assertion of who the caller was —
+  see [the credential rule](#the-credential-rule-which-is-the-part-that-matters).
+  Propagating a verified principal needs both halves written at once: guard
+  asserting it, and each service checking it rather than trusting the network.
+  Until then a routed service can authenticate the caller and cannot *authorise*
+  them, which is a real limit on what routing is good for and the reason this is
+  named here rather than left to be discovered.
+- **No readiness probe per service.** A configured upstream is a dependency and
+  is deliberately **not** registered as a probe: `/readyz` failing whenever any
+  optional service is down would take a working gateway out of rotation for a
+  path nobody called, and a probe per service is health-checking, which is its
+  own packet with its own cost to state. Today a service that is down shows up as
+  a `503` on the paths that use it and in the log, and nowhere else.
+- **A per-prefix rate-limit allowance.** Routed paths spend `guard-api`, the same
+  budget as the rest of `/v1/`. A prefix-specific number is not expressible today
+  because the limit table is code and the prefixes are configuration, and a table
+  that is half configuration and half code is one where lowering a number is
+  mistaken for having lowered it. The pairing is a packet.
 - **The live Redis tier does not run inside the image.** `docker build --target
   test` has no `redis-server` and no way to reach one. Measured on Docker 29.4.0,
   because the reason is not the obvious one: `--network=host` is *accepted*, and a
@@ -670,8 +833,8 @@ the source with the packet that replaces them.
   run the script where `REDIS_URL` is actually configured, so a deployment that
   sets it is checked against the store it will really use. CI proves the script;
   nothing yet proves a given deployment points at a working Redis.
-- **Thirteen test files ship in the runtime image.** The Dockerfile copies `src`
-  into the runtime stage, and thirteen `src/**/*.test.ts` come with it. They are
+- **Seventeen test files ship in the runtime image.** The Dockerfile copies `src`
+  into the runtime stage, and seventeen `src/**/*.test.ts` come with it. They are
   inert — nothing imports them, and `bun:test` is a runtime builtin rather than a
   dependency the production tree installs — so this is about what the image
   contains, not about what it can do. Removing them means copying the tree with
@@ -743,6 +906,8 @@ src/middleware/rateLimitStore.ts   GCRA in memory, per process
 src/middleware/rateLimitRedis.ts   GCRA in Redis, one Lua script, plus RESP2
 src/middleware/apiKey.ts     API keys: issue, authenticate, revoke
 src/middleware/assert.ts     configuration checks, one RangeError each
+src/routes/table.ts         which prefix goes where, validated, and the resolver
+src/routes/proxy.ts         the pass-through: rebuild, attach guard's credential, translate
 src/bff/auth.ts              the /auth surface: identity calls, the cookie, the origin gate
 src/bff/session.ts           SessionStore + the in-memory v0 implementation
 test/fakeIdentity.ts         a stand-in for identity's auth API (never shipped)

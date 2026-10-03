@@ -421,6 +421,62 @@ describe("runtimeOptions: the rate limiter", () => {
   });
 });
 
+describe("runtimeOptions: the route table", () => {
+  const PANTRY = JSON.stringify({
+    "/v1/pantry": { baseUrl: "http://pantry:8080", token: "svc-pantry" },
+    "/v1/quiet": { baseUrl: "http://quiet:8080" },
+  });
+
+  test("no ROUTE_TABLE means no routing, which is a legitimate deployment", () => {
+    // The same default as every other option: omitted means the capability is
+    // absent, not silently present with a guessed destination.
+    expect(runtimeOptions({}).routes).toBeUndefined();
+    expect(runtimeOptions({ ROUTE_TABLE: "  " }).routes).toBeUndefined();
+  });
+
+  test("the table is read, validated, and reduced to origins", () => {
+    const { routes } = runtimeOptions({ ROUTE_TABLE: PANTRY });
+
+    expect(routes).toEqual({
+      "/v1/pantry": { baseUrl: "http://pantry:8080", token: "svc-pantry" },
+      "/v1/quiet": { baseUrl: "http://quiet:8080", token: undefined },
+    });
+  });
+
+  test("a value that is not JSON is a startup error naming the variable", () => {
+    // `JSON.parse`'s own message names a character position in a string the
+    // operator never wrote, so it is replaced: a startup error that does not name
+    // the variable is one an operator reads as a bug in guard.
+    expect(() => runtimeOptions({ ROUTE_TABLE: "{/v1/pantry:http://pantry}" })).toThrow(/ROUTE_TABLE/);
+    expect(() => runtimeOptions({ ROUTE_TABLE: "[]" })).toThrow(/ROUTE_TABLE must be a JSON object/);
+    expect(() => runtimeOptions({ ROUTE_TABLE: '"http://pantry"' })).toThrow(/ROUTE_TABLE must be a JSON object/);
+  });
+
+  test("a well-formed table that is not routable is refused by the same rules", () => {
+    // The validation is not re-implemented for the environment: `routeTable()` is
+    // the only gate, so a value that would be refused by `createApp({ routes })`
+    // is refused here, and one that would be accepted is accepted.
+    for (const table of [
+      JSON.stringify({ "/pantry": { baseUrl: "http://pantry:8080" } }),
+      JSON.stringify({ "/v1/*": { baseUrl: "http://pantry:8080" } }),
+      JSON.stringify({ "/v1/pantry": { baseUrl: "pantry:8080" } }),
+      JSON.stringify({ "/v1/pantry": { baseUrl: "http://pantry:8080/api" } }),
+      JSON.stringify({ "/v1/pantry": { baseUrl: "http://pantry:8080", token: "a b" } }),
+      JSON.stringify({}),
+    ]) {
+      expect(() => runtimeOptions({ ROUTE_TABLE: table }), table).toThrow(RangeError);
+      expect(() => createApp(runtimeOptions({ ROUTE_TABLE: table })), table).toThrow(RangeError);
+    }
+  });
+
+  test("reading the table opens no socket and needs no `fetch`", () => {
+    // `runtimeOptions` cannot inject a `fetch` — it reads the environment — so
+    // an app built from it has a real one. Building it must still not call it,
+    // which is the property the test stage depends on.
+    expect(() => createApp(runtimeOptions({ ROUTE_TABLE: PANTRY }))).not.toThrow();
+  });
+});
+
 describe("the shipped per-route table, through the app", () => {
   // `rateLimit: {}` and nothing else: the shipped table, the in-memory store, no
   // trusted proxies, and a real clock. This is what a deployment that accepted

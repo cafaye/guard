@@ -18,6 +18,22 @@ export function assertNonNegativeInteger(value: number, field: string): void {
 }
 
 /**
+ * A string with something in it.
+ *
+ * The other half of "a missing value is not a value": `assertPositiveInteger`
+ * catches `0` and `undefined` in one test because `Number.isInteger` does, and
+ * a string needs its own. It is here rather than written at each call site
+ * because the thing it refuses is always the same mistake — a variable an
+ * operator set to nothing, or a field nobody set — and the message naming the
+ * field is the whole value of it.
+ */
+export function assertNonEmptyString(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new RangeError(`${field} must be a non-empty string, got ${JSON.stringify(value)}`);
+  }
+}
+
+/**
  * A structured-field key, per RFC 9651 §3.1.1.3: `lcalpha / DIGIT / "_" / "-"
  * / "." / "*"`, opening on a letter or `*`, at most 64 characters.
  *

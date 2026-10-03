@@ -13,20 +13,24 @@
 # `GET /v1/me` that proves the token chain is wired, and the four `/auth` browser
 # routes. Seven operations, and nothing else.
 #
-# It does **not** describe the routing that guard is built to do. No request is
-# proxied to a service yet, and the document does not pretend otherwise.
+# It does **not** describe the pass-through. A configured route table sends the
+# paths under a prefix to the service that owns them, and this document has no
+# way to name those operations: the path space is the service's, decided by
+# configuration, and OpenAPI describes paths rather than a subtree. What it can
+# do is say where the pass-through is mounted and why it is not here.
 #
 # ## The two kinds of thing `createApp` registers
 #
 # Hono records a route with its own method and every `app.use(…)` mount with the
 # method `ALL`. There are exactly two mounts, and neither is an operation:
 #
-#   * `ALL /v1/*` — the prefix the bearer-token gate is mounted on, and the prefix
-#     the routing packet will mount the pass-through to the services behind guard
-#     on. It has no method, no response and no body of its own, so OpenAPI has
-#     nothing to describe it as. **Excluded as that exact method+path pair** — not
-#     as a `/v1/` prefix, which would cover every route the API surface gains from
-#     here on. `GET /v1/me` is under that prefix and is in this document.
+#   * `ALL /v1/*` — the prefix the bearer-token gate is mounted on, and the
+#     prefix the pass-through to the services behind guard is mounted on when a
+#     route table is configured. It has no method, no response and no body of its
+#     own, so OpenAPI has nothing to describe it as. **Excluded as that exact
+#     method+path pair** — not as a `/v1/` prefix, which would cover every route
+#     the API surface gains from here on. `GET /v1/me` is under that prefix and
+#     is in this document.
 #   * `ALL /*` — the whole-app mounts: the API-key gate and the rate limiter. Two
 #     gates, one key here, and a route at the root is a `GET` or a `POST`, so it
 #     is not covered by either.
@@ -103,9 +107,11 @@
 #     either the browser surface, which core's own auth section calls "a
 #     *different* surface, not an API exception", or the infrastructure probes,
 #     whose paths are conventional rather than ours to choose. `GET /v1/me` is the
-#     only API-surface operation, and it is a placeholder the routing packet
-#     replaces. Requested: either core's `/v1` rule gets an explicit carve-out
-#     for a BFF and for probes, or the browser surface is renamed under `/v1` and
+#     only API-surface operation here, and the pass-through is mounted rather than
+#     served: its paths belong to the services behind guard and are decided by
+#     configuration, so there is no operation to describe. Requested: either
+#     core's `/v1` rule gets an explicit carve-out for a BFF, for probes and for
+#     a configured pass-through, or the browser surface is renamed under `/v1` and
 #     the two rule-menders are the same decision.
 #
 #  3. The API key is not a bearer JWT.
@@ -184,11 +190,11 @@ info:
   # Non-breaking additions bump this and nothing else. A breaking change bumps the
   # `/v1` prefix and this in the same commit, and `/v1` is never mutated in place.
   version: 1.0.0
-  summary: The cafaye public gateway — authentication, rate limits, and the browser sign-in surface.
+  summary: The cafaye public gateway — authentication, rate limits, routing, and the browser sign-in surface.
   description: |
     `guard` is the only door into a cafaye deployment. It authenticates callers,
-    limits what they can ask for, and — once the routing packet lands — forwards
-    requests to the service that owns the work. It holds no business data and
+    limits what they can ask for, and forwards requests under a configured path
+    prefix to the service that owns the work. It holds no business data and
     publishes no events.
 
     ## Two surfaces, two credentials, and they do not cross
@@ -236,11 +242,19 @@ info:
     replicas of the in-memory store is an N-times limit. See the header on
     `RateLimit-Limit` for what to do about a field that is absent.
 
-    ## Nothing is proxied yet
+    ## The auth-chain probe, and what is not in this document
 
     `GET /v1/me` is the operation that proves the auth chain is wired end to end:
-    no behaviour of its own, and it forwards nothing. The routing packet replaces
-    it with real traffic, and this document grows with it.
+    no behaviour of its own, and it forwards nothing. It is **kept** rather than
+    replaced by the pass-through — a deployment needs a route it can call to check
+    that chain without asking a service for anything, and routed traffic is a
+    different surface rather than a bigger version of this one.
+
+    What is not in this document is the pass-through itself: a configured route
+    table forwards the paths under a prefix to the service that owns them, and
+    those paths are the service's, decided by configuration. OpenAPI describes
+    paths, not subtrees, so the routed surface is stated in the README's Routing
+    section and mounted (not served) on the `ALL /v1/*` pair above.
   contact:
     name: guard
     url: https://github.com/cafaye/guard

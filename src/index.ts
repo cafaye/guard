@@ -8,6 +8,8 @@ import { lazyRedis, redisRateLimitStore, type RedisCommands } from "./middleware
 import { createApiKeyAuth, type ApiKeyStore } from "./middleware/apiKey";
 import { DEFAULT_LIMIT_TABLE, limitTable, resolveLimit, type LimitTable } from "./middleware/limits";
 import { createBffAuth, DEFAULT_IDENTITY_URL, identityProbe, type BffOptions } from "./bff/auth";
+import { createRouteProxy, type ProxyFetch } from "./routes/proxy";
+import { ROUTE_MOUNT, routeTable, type RouteTable } from "./routes/table";
 import type { Probe, ProbeStatus } from "./probe";
 
 export type { Probe, ProbeStatus } from "./probe";
@@ -54,6 +56,30 @@ export type AppOptions = {
    * default for a deployment that has not decided where keys are stored.
    */
   apiKeys?: { keys: ApiKeyStore };
+  /**
+   * Which path prefix goes to which service. Omit and guard forwards nothing,
+   * for the same reason the other options are optional: an app built with no
+   * services has nothing to forward to, and a gateway that invented a
+   * destination would be an open proxy.
+   *
+   * Validated at construction like everything else here — a prefix outside
+   * `/v1/`, a glob, a base URL carrying a path, a token with a newline in it are
+   * all a refusal to boot rather than a request that goes somewhere nobody
+   * intended. The table is a plain object on purpose: the service registry that
+   * would *populate* it is a later packet, and filling it from somewhere else
+   * changes this option and nothing else.
+   */
+  routes?: RouteTable;
+  /**
+   * How the pass-through reaches a service. Both halves are for tests and for
+   * nothing else, and both are arguments for the reason `AppOptions` is one: a
+   * suite that has to be near a listening upstream to assert what guard sends is
+   * a suite that also asserts the network's opinions.
+   */
+  proxy?: {
+    fetch?: ProxyFetch;
+    timeoutMs?: number;
+  };
 };
 
 /**
@@ -76,6 +102,12 @@ const DEFAULT_CLIENT_ID = "guard";
  */
 export function createApp(options: AppOptions = {}): Hono<AuthEnv> {
   const app = new Hono<AuthEnv>();
+
+  // The route table is validated before anything else is registered, so a
+  // malformed one is a refusal to construct the app at all rather than a 404 on
+  // the first request of the week. Validated only when one was given, because an
+  // app built with no services is a legitimate shape: it forwards nothing.
+  const routes = options.routes === undefined ? null : routeTable(options.routes);
 
   // Liveness is unconditional and touches nothing. A dependency outage must not
   // get the process restarted out from under in-flight requests; that is
@@ -145,9 +177,34 @@ export function createApp(options: AppOptions = {}): Hono<AuthEnv> {
 
   if (jwt) {
     // The route that proves the chain is wired: no behaviour of its own, and it
-    // forwards nothing. It is here so a deployment can be checked end to end,
-    // and the routing packet replaces it with real traffic.
+    // forwards nothing. It is here so a deployment can be checked end to end.
+    //
+    // It is NOT a placeholder for the routes behind the pass-through any more,
+    // and it is not removed by them: it is the only route in the document whose
+    // whole answer is "the auth chain is wired", which a deployment wants to be
+    // able to check without asking a service for anything. The README says so,
+    // and this is the line that has to stay true.
     app.get("/v1/me", (c) => c.json(c.get("principal")));
+  }
+
+  // The pass-through. Mounted on the `/v1/*` prefix and registered *after*
+  // `/v1/me`, which is load-bearing rather than tidy: Hono answers in
+  // registration order, so guard's own route is served before the mount can see
+  // it. The other ordering is a gateway whose `/v1/me` proxies to whichever
+  // service a table names, and nobody notices until it does.
+  //
+  // It is mounted on the prefix rather than per configured route, so a new
+  // prefix is not a new mount: the table decides what is reachable and the
+  // router does not have to know about it. Authentication and the limiter are
+  // both above this line, which is why routed traffic is authenticated and
+  // counted without either of them knowing that routing exists.
+  if (routes !== null) {
+    const proxy = createRouteProxy({
+      routes,
+      ...(options.proxy?.fetch ? { fetch: options.proxy.fetch } : {}),
+      ...(options.proxy?.timeoutMs === undefined ? {} : { timeoutMs: options.proxy.timeoutMs }),
+    });
+    app.use(ROUTE_MOUNT, proxy);
   }
 
   // The browser surface. Mounted per route, not on the /auth/* prefix: the
@@ -267,7 +324,51 @@ export function runtimeOptions(env: Record<string, string | undefined> = Bun.env
       // instance, and it says so in its own source and in the README.
       ...(redis ? { store: redisRateLimitStore({ commands: redis.commands, prefix: redis.prefix }) } : {}),
     },
+    ...routesFromEnv(env),
   };
+}
+
+/**
+ * The route table, or nothing.
+ *
+ * One variable holding one JSON object, because the table is the configuration
+ * and a per-service variable per service would be N variables whose names encode
+ * a routing decision (`PANTRY_PREFIX`) that the table states instead:
+ *
+ *   ROUTE_TABLE={"/v1/pantry":{"baseUrl":"http://pantry:8080","token":"…"}}
+ *
+ * Unset or empty means no routing at all, which is the honest default for a
+ * deployment that has not decided where anything goes. A value that is not JSON,
+ * or JSON of the wrong shape, or JSON that `routeTable()` refuses is a refusal
+ * to boot — the same rule as every other variable here, and for the same reason:
+ * a typo'd route table is a gateway that answers 404 for a service that exists.
+ *
+ * The parse error is replaced rather than propagated because `JSON.parse`'s own
+ * message names a character position in a string the operator never wrote — and
+ * a startup error that does not name the variable is one an operator reads as a
+ * bug in guard.
+ */
+function routesFromEnv(env: Record<string, string | undefined>): { routes?: RouteTable } {
+  const raw = env.ROUTE_TABLE?.trim();
+  if (!raw) return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new RangeError(
+      `guard: ROUTE_TABLE must be a JSON object mapping a path prefix to {"baseUrl": …, "token": …}, ` +
+        `and it is not JSON. It names ${JSON.stringify(raw)}.`,
+    );
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new RangeError(`guard: ROUTE_TABLE must be a JSON object, got ${JSON.stringify(raw)}`);
+  }
+
+  // Validated here as well as in `createApp`, so a bad value is refused by the
+  // call that reads the environment rather than one layer later.
+  return { routes: routeTable(parsed as RouteTable) };
 }
 
 type RedisConfig = { commands: RedisCommands; prefix: string | undefined; probe: Probe };
