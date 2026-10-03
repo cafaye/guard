@@ -8,6 +8,7 @@ import { lazyRedis, redisRateLimitStore, type RedisCommands } from "./middleware
 import { createApiKeyAuth, type ApiKeyStore } from "./middleware/apiKey";
 import { DEFAULT_LIMIT_TABLE, limitTable, resolveLimit, type LimitTable } from "./middleware/limits";
 import { createBffAuth, DEFAULT_IDENTITY_URL, identityProbe, type BffOptions } from "./bff/auth";
+import { routeTable, type RouteTable } from "./routes/table";
 import type { Probe, ProbeStatus } from "./probe";
 
 export type { Probe, ProbeStatus } from "./probe";
@@ -54,6 +55,20 @@ export type AppOptions = {
    * default for a deployment that has not decided where keys are stored.
    */
   apiKeys?: { keys: ApiKeyStore };
+  /**
+   * Which path prefix goes to which service. Omit and guard forwards nothing,
+   * for the same reason the other options are optional: an app built with no
+   * services has nothing to forward to, and a gateway that invented a
+   * destination would be an open proxy.
+   *
+   * Validated at construction like everything else here — a prefix outside
+   * `/v1/`, a glob, a base URL carrying a path, a token with a newline in it are
+   * all a refusal to boot rather than a request that goes somewhere nobody
+   * intended. The table is a plain object on purpose: the service registry that
+   * would *populate* it is a later packet, and filling it from somewhere else
+   * changes this option and nothing else.
+   */
+  routes?: RouteTable;
 };
 
 /**
@@ -76,6 +91,12 @@ const DEFAULT_CLIENT_ID = "guard";
  */
 export function createApp(options: AppOptions = {}): Hono<AuthEnv> {
   const app = new Hono<AuthEnv>();
+
+  // The route table is validated before anything else is registered, so a
+  // malformed one is a refusal to construct the app at all rather than a 404 on
+  // the first request of the week. Validated only when one was given, because an
+  // app built with no services is a legitimate shape: it forwards nothing.
+  if (options.routes !== undefined) routeTable(options.routes);
 
   // Liveness is unconditional and touches nothing. A dependency outage must not
   // get the process restarted out from under in-flight requests; that is
