@@ -324,7 +324,51 @@ export function runtimeOptions(env: Record<string, string | undefined> = Bun.env
       // instance, and it says so in its own source and in the README.
       ...(redis ? { store: redisRateLimitStore({ commands: redis.commands, prefix: redis.prefix }) } : {}),
     },
+    ...routesFromEnv(env),
   };
+}
+
+/**
+ * The route table, or nothing.
+ *
+ * One variable holding one JSON object, because the table is the configuration
+ * and a per-service variable per service would be N variables whose names encode
+ * a routing decision (`PANTRY_PREFIX`) that the table states instead:
+ *
+ *   ROUTE_TABLE={"/v1/pantry":{"baseUrl":"http://pantry:8080","token":"…"}}
+ *
+ * Unset or empty means no routing at all, which is the honest default for a
+ * deployment that has not decided where anything goes. A value that is not JSON,
+ * or JSON of the wrong shape, or JSON that `routeTable()` refuses is a refusal
+ * to boot — the same rule as every other variable here, and for the same reason:
+ * a typo'd route table is a gateway that answers 404 for a service that exists.
+ *
+ * The parse error is replaced rather than propagated because `JSON.parse`'s own
+ * message names a character position in a string the operator never wrote — and
+ * a startup error that does not name the variable is one an operator reads as a
+ * bug in guard.
+ */
+function routesFromEnv(env: Record<string, string | undefined>): { routes?: RouteTable } {
+  const raw = env.ROUTE_TABLE?.trim();
+  if (!raw) return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new RangeError(
+      `guard: ROUTE_TABLE must be a JSON object mapping a path prefix to {"baseUrl": …, "token": …}, ` +
+        `and it is not JSON. It names ${JSON.stringify(raw)}.`,
+    );
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new RangeError(`guard: ROUTE_TABLE must be a JSON object, got ${JSON.stringify(raw)}`);
+  }
+
+  // Validated here as well as in `createApp`, so a bad value is refused by the
+  // call that reads the environment rather than one layer later.
+  return { routes: routeTable(parsed as RouteTable) };
 }
 
 type RedisConfig = { commands: RedisCommands; prefix: string | undefined; probe: Probe };

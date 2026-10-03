@@ -13,20 +13,24 @@
 # `GET /v1/me` that proves the token chain is wired, and the four `/auth` browser
 # routes. Seven operations, and nothing else.
 #
-# It does **not** describe the routing that guard is built to do. No request is
-# proxied to a service yet, and the document does not pretend otherwise.
+# It does **not** describe the pass-through. A configured route table sends the
+# paths under a prefix to the service that owns them, and this document has no
+# way to name those operations: the path space is the service's, decided by
+# configuration, and OpenAPI describes paths rather than a subtree. What it can
+# do is say where the pass-through is mounted and why it is not here.
 #
 # ## The two kinds of thing `createApp` registers
 #
 # Hono records a route with its own method and every `app.use(…)` mount with the
 # method `ALL`. There are exactly two mounts, and neither is an operation:
 #
-#   * `ALL /v1/*` — the prefix the bearer-token gate is mounted on, and the prefix
-#     the routing packet will mount the pass-through to the services behind guard
-#     on. It has no method, no response and no body of its own, so OpenAPI has
-#     nothing to describe it as. **Excluded as that exact method+path pair** — not
-#     as a `/v1/` prefix, which would cover every route the API surface gains from
-#     here on. `GET /v1/me` is under that prefix and is in this document.
+#   * `ALL /v1/*` — the prefix the bearer-token gate is mounted on, and the
+#     prefix the pass-through to the services behind guard is mounted on when a
+#     route table is configured. It has no method, no response and no body of its
+#     own, so OpenAPI has nothing to describe it as. **Excluded as that exact
+#     method+path pair** — not as a `/v1/` prefix, which would cover every route
+#     the API surface gains from here on. `GET /v1/me` is under that prefix and
+#     is in this document.
 #   * `ALL /*` — the whole-app mounts: the API-key gate and the rate limiter. Two
 #     gates, one key here, and a route at the root is a `GET` or a `POST`, so it
 #     is not covered by either.

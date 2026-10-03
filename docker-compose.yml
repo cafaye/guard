@@ -233,6 +233,23 @@ services:
       # is correct for one replica and is not a platform limit.
       # REDIS_URL: "redis://redis:6379"
 
+      # WHERE A PATH GOES, as one JSON object of prefix -> upstream. Unset is the
+      # honest default for this file: there is no service in it for guard to route
+      # to, and a route table naming one that is not running is a gateway that
+      # answers 503 for paths somebody believes are working.
+      #
+      # Prefixes must live under `/v1/` — the prefix the token gate and the limiter
+      # are mounted on, so a routed request is authenticated and counted without
+      # either of them knowing routing exists — and the pass-through forwards the
+      # rest of the path to the base URL with the prefix removed. `token` is the
+      # credential guard presents to that service; it is never the caller's own,
+      # and a caller's `Authorization` is not forwarded.
+      #
+      # Single-quoted rather than double-quoted, because a JSON object full of
+      # double quotes inside a double-quoted YAML scalar needs every one of them
+      # escaped, and an escaped route table is one somebody gets wrong at 3am.
+      # ROUTE_TABLE: '{"/v1/pantry":{"baseUrl":"http://pantry:8080","token":"..."}}'
+
     # THE CRASH LAYER, and it is the reason a panic reaches an operator with no
     # per-language log SDK in this repository — guard's `package.json` has two
     # runtime dependencies and neither is one.
