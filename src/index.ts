@@ -8,7 +8,8 @@ import { lazyRedis, redisRateLimitStore, type RedisCommands } from "./middleware
 import { createApiKeyAuth, type ApiKeyStore } from "./middleware/apiKey";
 import { DEFAULT_LIMIT_TABLE, limitTable, resolveLimit, type LimitTable } from "./middleware/limits";
 import { createBffAuth, DEFAULT_IDENTITY_URL, identityProbe, type BffOptions } from "./bff/auth";
-import { routeTable, type RouteTable } from "./routes/table";
+import { createRouteProxy, type ProxyFetch } from "./routes/proxy";
+import { ROUTE_MOUNT, routeTable, type RouteTable } from "./routes/table";
 import type { Probe, ProbeStatus } from "./probe";
 
 export type { Probe, ProbeStatus } from "./probe";
@@ -69,6 +70,16 @@ export type AppOptions = {
    * changes this option and nothing else.
    */
   routes?: RouteTable;
+  /**
+   * How the pass-through reaches a service. Both halves are for tests and for
+   * nothing else, and both are arguments for the reason `AppOptions` is one: a
+   * suite that has to be near a listening upstream to assert what guard sends is
+   * a suite that also asserts the network's opinions.
+   */
+  proxy?: {
+    fetch?: ProxyFetch;
+    timeoutMs?: number;
+  };
 };
 
 /**
@@ -96,7 +107,7 @@ export function createApp(options: AppOptions = {}): Hono<AuthEnv> {
   // malformed one is a refusal to construct the app at all rather than a 404 on
   // the first request of the week. Validated only when one was given, because an
   // app built with no services is a legitimate shape: it forwards nothing.
-  if (options.routes !== undefined) routeTable(options.routes);
+  const routes = options.routes === undefined ? null : routeTable(options.routes);
 
   // Liveness is unconditional and touches nothing. A dependency outage must not
   // get the process restarted out from under in-flight requests; that is
@@ -166,9 +177,34 @@ export function createApp(options: AppOptions = {}): Hono<AuthEnv> {
 
   if (jwt) {
     // The route that proves the chain is wired: no behaviour of its own, and it
-    // forwards nothing. It is here so a deployment can be checked end to end,
-    // and the routing packet replaces it with real traffic.
+    // forwards nothing. It is here so a deployment can be checked end to end.
+    //
+    // It is NOT a placeholder for the routes behind the pass-through any more,
+    // and it is not removed by them: it is the only route in the document whose
+    // whole answer is "the auth chain is wired", which a deployment wants to be
+    // able to check without asking a service for anything. The README says so,
+    // and this is the line that has to stay true.
     app.get("/v1/me", (c) => c.json(c.get("principal")));
+  }
+
+  // The pass-through. Mounted on the `/v1/*` prefix and registered *after*
+  // `/v1/me`, which is load-bearing rather than tidy: Hono answers in
+  // registration order, so guard's own route is served before the mount can see
+  // it. The other ordering is a gateway whose `/v1/me` proxies to whichever
+  // service a table names, and nobody notices until it does.
+  //
+  // It is mounted on the prefix rather than per configured route, so a new
+  // prefix is not a new mount: the table decides what is reachable and the
+  // router does not have to know about it. Authentication and the limiter are
+  // both above this line, which is why routed traffic is authenticated and
+  // counted without either of them knowing that routing exists.
+  if (routes !== null) {
+    const proxy = createRouteProxy({
+      routes,
+      ...(options.proxy?.fetch ? { fetch: options.proxy.fetch } : {}),
+      ...(options.proxy?.timeoutMs === undefined ? {} : { timeoutMs: options.proxy.timeoutMs }),
+    });
+    app.use(ROUTE_MOUNT, proxy);
   }
 
   // The browser surface. Mounted per route, not on the /auth/* prefix: the
